@@ -227,7 +227,7 @@ enum StickerSymbol: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 }
 
-struct EffectPreset: Equatable, Codable, Sendable, Identifiable {
+struct EffectPreset: Equatable, Hashable, Codable, Sendable, Identifiable {
     var id: String
     var style: CensorStyle
     var blurRadius: Double

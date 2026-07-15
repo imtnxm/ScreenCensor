@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import ScreenCaptureKit
+import SwiftUI
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -105,7 +106,7 @@ final class AppModel: ObservableObject {
         statusMessage = permissionGranted ? "Ready" : "Screen Recording permission required"
     }
 
-    func binding(for part: BodyPartID) -> Binding<BodyPartRule> {
+    func ruleBinding(for part: BodyPartID) -> Binding<BodyPartRule> {
         Binding(
             get: { self.configuration.rule(for: part) },
             set: { self.configuration.updateRule($0) }

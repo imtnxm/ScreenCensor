@@ -51,8 +51,10 @@ jobs:
       - name: Convert NudeNet 320n to Core ML
         run: |
           set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 Scripts/convert_nudenet_coreml.py \
+          python3 -m venv build/venv
+          source build/venv/bin/activate
+          python -m pip install --upgrade pip
+          python Scripts/convert_nudenet_coreml.py \
             --work-dir build/model-work \
             --out-dir Resources/Models
           ls -la Resources/Models || true

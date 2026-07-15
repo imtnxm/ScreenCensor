@@ -154,28 +154,28 @@ private struct PartsTab: View {
     }
 
     private func partRow(_ part: BodyPartID) -> some View {
-        let binding = model.binding(for: part)
+        let ruleBinding = model.ruleBinding(for: part)
         return VStack(alignment: .leading, spacing: 4) {
             Toggle(part.title, isOn: Binding(
-                get: { binding.wrappedValue.enabled },
+                get: { ruleBinding.wrappedValue.enabled },
                 set: {
-                    var r = binding.wrappedValue
+                    var r = ruleBinding.wrappedValue
                     r.enabled = $0
-                    binding.wrappedValue = r
+                    ruleBinding.wrappedValue = r
                 }
             ))
-            if binding.wrappedValue.enabled {
+            if ruleBinding.wrappedValue.enabled {
                 HStack {
-                    Text("Confidence \(Int(binding.wrappedValue.confidenceThreshold * 100))%")
+                    Text("Confidence \(Int(ruleBinding.wrappedValue.confidenceThreshold * 100))%")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Slider(
                         value: Binding(
-                            get: { Double(binding.wrappedValue.confidenceThreshold) },
+                            get: { Double(ruleBinding.wrappedValue.confidenceThreshold) },
                             set: {
-                                var r = binding.wrappedValue
+                                var r = ruleBinding.wrappedValue
                                 r.confidenceThreshold = Float($0)
-                                binding.wrappedValue = r
+                                ruleBinding.wrappedValue = r
                             }
                         ),
                         in: 0.1...0.9
@@ -197,7 +197,10 @@ private struct EffectsTab: View {
                 Text("Global Default Effect")
                     .font(.subheadline.weight(.semibold))
 
-                effectEditor(effect: $model.configuration.globalEffect)
+                effectEditor(Binding(
+                    get: { model.configuration.globalEffect },
+                    set: { model.configuration.globalEffect = $0 }
+                ))
 
                 Button("Apply Global Effect to All Parts") {
                     model.configuration.applyGlobalEffectToAll()
@@ -211,7 +214,7 @@ private struct EffectsTab: View {
 
                 ForEach(BodyPartID.allCases.filter { model.configuration.rule(for: $0).enabled }) { part in
                     DisclosureGroup(part.title) {
-                        effectEditor(effect: Binding(
+                        effectEditor(Binding(
                             get: { model.configuration.rule(for: part).effect },
                             set: {
                                 var r = model.configuration.rule(for: part)
@@ -226,7 +229,7 @@ private struct EffectsTab: View {
         }
     }
 
-    private func effectEditor(effect: Binding<EffectPreset>) -> some View {
+    private func effectEditor(_ effect: Binding<EffectPreset>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("Style", selection: effect.style) {
                 ForEach(CensorStyle.allCases) { style in
