@@ -48,6 +48,11 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Convert NudeNet 320n to Core ML
         run: |
           set -euo pipefail
@@ -57,7 +62,11 @@ jobs:
           python Scripts/convert_nudenet_coreml.py \
             --work-dir build/model-work \
             --out-dir Resources/Models
-          ls -la Resources/Models || true
+          ls -lah Resources/Models || true
+          # Fail the step loudly if no model landed (job can still continue).
+          test -e Resources/Models/NudeNet320n.mlpackage \
+            -o -e Resources/Models/NudeNet320n.mlmodel \
+            -o -e Resources/Models/NudeNet320n.mlmodelc
         continue-on-error: true
 
       - name: Install XcodeGen
