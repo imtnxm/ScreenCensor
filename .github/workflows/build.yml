@@ -19,9 +19,34 @@ jobs:
 
       - name: Select Xcode
         run: |
+          set -euo pipefail
           echo "Available Xcode versions:"
           ls /Applications | grep -i xcode || true
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+          # Prefer Xcode 16.x so xcodebuild can read project format 77
+          # produced by current XcodeGen on Homebrew.
+          SELECTED=""
+          for candidate in \
+            "/Applications/Xcode_16.4.app" \
+            "/Applications/Xcode_16.3.app" \
+            "/Applications/Xcode_16.2.app" \
+            "/Applications/Xcode_16.1.app" \
+            "/Applications/Xcode_16.0.app" \
+            "/Applications/Xcode.app"
+          do
+            if [ -d "${candidate}" ]; then
+              SELECTED="${candidate}"
+              break
+            fi
+          done
+
+          if [ -z "${SELECTED}" ]; then
+            echo "No usable Xcode.app found under /Applications"
+            exit 1
+          fi
+
+          echo "Selecting ${SELECTED}"
+          sudo xcode-select -s "${SELECTED}/Contents/Developer"
           xcodebuild -version
           swift --version
 
