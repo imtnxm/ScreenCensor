@@ -11,8 +11,10 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 
-WEIGHTS_URL = "https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/320n.pt"
+WEIGHTS_API_URL = "https://api.github.com/repos/notAI-tech/NudeNet/releases/assets/176832011"
+WEIGHTS_BROWSER_URL = "https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/320n.pt"
 EXPECTED_MIN_BYTES = 5_000_000
+EXPECTED_BYTES = 6_219_609
 
 LABELS = [
     "FEMALE_GENITALIA_COVERED",
@@ -56,18 +58,30 @@ def ensure_deps() -> None:
         )
 
 
-def download(url: str, dest: Path) -> None:
+def download(dest: Path) -> None:
+    import os
+
     if dest.exists() and dest.stat().st_size >= EXPECTED_MIN_BYTES:
         print(f"Using cached weights: {dest} ({dest.stat().st_size} bytes)")
         return
 
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    headers = {"User-Agent": "ScreenCensor-CI/1.0"}
+    # Prefer GitHub API + token: browser release URLs often redirect to a login HTML page.
+    if token:
+        url = WEIGHTS_API_URL
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/octet-stream"
+    else:
+        url = WEIGHTS_BROWSER_URL
+
     print(f"Downloading {url}")
-    req = Request(url, headers={"User-Agent": "ScreenCensor-CI/1.0"})
-    with urlopen(req, timeout=120) as response, open(dest, "wb") as out:
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=180) as response, open(dest, "wb") as out:
         shutil.copyfileobj(response, out)
 
     size = dest.stat().st_size
-    print(f"Downloaded {size} bytes")
+    print(f"Downloaded {size} bytes (expected ~{EXPECTED_BYTES})")
     if size < EXPECTED_MIN_BYTES:
         head = dest.read_bytes()[:200]
         dest.unlink(missing_ok=True)
@@ -88,7 +102,7 @@ def main() -> int:
     from ultralytics import YOLO
 
     weights = args.work_dir / "320n.pt"
-    download(WEIGHTS_URL, weights)
+    download(weights)
 
     model = YOLO(str(weights))
     if hasattr(model, "model") and hasattr(model.model, "names"):
