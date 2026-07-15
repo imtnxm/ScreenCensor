@@ -231,7 +231,13 @@ private struct EffectsTab: View {
 
     private func effectEditor(_ effect: Binding<EffectPreset>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Style", selection: effect.style) {
+            Picker(
+                "Style",
+                selection: Binding(
+                    get: { effect.wrappedValue.style },
+                    set: { effect.wrappedValue.style = $0 }
+                )
+            ) {
                 ForEach(CensorStyle.allCases) { style in
                     Text(style.title).tag(style)
                 }
@@ -239,19 +245,51 @@ private struct EffectsTab: View {
             .pickerStyle(.menu)
 
             if effect.wrappedValue.style == .blur {
-                labeledSlider("Blur", value: effect.blurRadius, range: 4...48)
+                labeledSlider(
+                    "Blur",
+                    value: Binding(
+                        get: { effect.wrappedValue.blurRadius },
+                        set: { effect.wrappedValue.blurRadius = $0 }
+                    ),
+                    range: 4...48
+                )
             }
             if effect.wrappedValue.style == .pixelate {
-                labeledSlider("Pixel Size", value: effect.pixelScale, range: 4...40)
+                labeledSlider(
+                    "Pixel Size",
+                    value: Binding(
+                        get: { effect.wrappedValue.pixelScale },
+                        set: { effect.wrappedValue.pixelScale = $0 }
+                    ),
+                    range: 4...40
+                )
             }
             if effect.wrappedValue.style == .label {
-                TextField("Label text", text: effect.labelText)
-                    .textFieldStyle(.roundedBorder)
-                TextField("Emoji", text: effect.labelEmoji)
-                    .textFieldStyle(.roundedBorder)
+                TextField(
+                    "Label text",
+                    text: Binding(
+                        get: { effect.wrappedValue.labelText },
+                        set: { effect.wrappedValue.labelText = $0 }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                TextField(
+                    "Emoji",
+                    text: Binding(
+                        get: { effect.wrappedValue.labelEmoji },
+                        set: { effect.wrappedValue.labelEmoji = $0 }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
             }
             if effect.wrappedValue.style == .sticker {
-                Picker("Sticker", selection: effect.sticker) {
+                Picker(
+                    "Sticker",
+                    selection: Binding(
+                        get: { effect.wrappedValue.sticker },
+                        set: { effect.wrappedValue.sticker = $0 }
+                    )
+                ) {
                     ForEach(StickerSymbol.allCases) { symbol in
                         Label(symbol.title, systemImage: symbol.rawValue).tag(symbol)
                     }
@@ -261,10 +299,22 @@ private struct EffectsTab: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(String(format: "Opacity: %.0f%%", effect.wrappedValue.fillOpacity * 100))
                     .font(.caption)
-                Slider(value: effect.fillOpacity, in: 0.2...1.0)
+                Slider(
+                    value: Binding(
+                        get: { effect.wrappedValue.fillOpacity },
+                        set: { effect.wrappedValue.fillOpacity = $0 }
+                    ),
+                    in: 0.2...1.0
+                )
             }
 
-            Picker("Animation", selection: effect.animation) {
+            Picker(
+                "Animation",
+                selection: Binding(
+                    get: { effect.wrappedValue.animation },
+                    set: { effect.wrappedValue.animation = $0 }
+                )
+            ) {
                 ForEach(OverlayAnimation.allCases) { anim in
                     Text(anim.title).tag(anim)
                 }
