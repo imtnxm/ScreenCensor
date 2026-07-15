@@ -1,0 +1,60 @@
+# XcodeGen output
+*.xcodeproj/
+*.xcworkspace/
+
+# Build products
+build/
+DerivedData/
+*.app/
+*.dSYM/
+*.ipa
+*.xcarchive/
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# CocoaPods / Carthage leftovers
+Pods/
+Carthage/Build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.moved-aside
+*.hmap
+*.ipa
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+# Secrets / local overrides
+*.mobileprovision
+*.p12
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Artifacts
+artifacts/
+dist/

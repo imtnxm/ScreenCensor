@@ -1,0 +1,70 @@
+name: Build ScreenCensor
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Generate and Build
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          echo "Available Xcode versions:"
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app (ad-hoc signed)
+        run: |
+          set -euo pipefail
+          mkdir -p build/DerivedData artifacts
+
+          xcodebuild \
+            -project ScreenCensor.xcodeproj \
+            -scheme ScreenCensor \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            build
+
+          APP_PATH=$(find build/DerivedData/Build/Products -type d -name 'ScreenCensor.app' | head -n 1)
+          if [ -z "${APP_PATH}" ]; then
+            echo "ScreenCensor.app not found after build"
+            find build/DerivedData/Build/Products -maxdepth 3 -print
+            exit 1
+          fi
+
+          echo "Built app at: ${APP_PATH}"
+          ditto "${APP_PATH}" "artifacts/ScreenCensor.app"
+          codesign -dv --verbose=2 "artifacts/ScreenCensor.app" || true
+          ls -la artifacts
+
+      - name: Upload ScreenCensor.app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenCensor-macOS
+          path: artifacts/ScreenCensor.app
+          if-no-files-found: error
+          retention-days: 14

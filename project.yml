@@ -1,0 +1,69 @@
+name: ScreenCensor
+options:
+  bundleIdPrefix: com.screencensor
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ONLY_ACTIVE_ARCH: YES
+    ENABLE_HARDENED_RUNTIME: YES
+    CLANG_ENABLE_MODULES: YES
+    SWIFT_STRICT_CONCURRENCY: targeted
+
+targets:
+  ScreenCensor:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources
+        excludes:
+          - "**/.DS_Store"
+      - path: Resources
+        buildPhase: resources
+        excludes:
+          - "**/.DS_Store"
+          - "ScreenCensor.entitlements"
+          - "Models/README.md"
+          - "Models/.gitkeep"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.screencensor.app
+        PRODUCT_NAME: ScreenCensor
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: ScreenCensor
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_LSMinimumSystemVersion: "14.0"
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 ScreenCensor"
+        INFOPLIST_KEY_NSScreenCaptureUsageDescription: "ScreenCensor needs Screen Recording access to detect and censor content in real time on your display. Capture stays on-device and is never uploaded."
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_ENTITLEMENTS: Resources/ScreenCensor.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+    entitlements:
+      path: Resources/ScreenCensor.entitlements
+    scheme:
+      testTargets: []
+      gatherCoverageData: false
+
+schemes:
+  ScreenCensor:
+    build:
+      targets:
+        ScreenCensor: all
+    run:
+      config: Debug
+    archive:
+      config: Release
