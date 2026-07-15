@@ -1,113 +1,81 @@
-# ScreenCensor
+# ScreenCensor Pro
 
-Real-time, on-device macOS screen censoring menu bar app.
+Real-time, on-device macOS menu-bar app that detects and censors body parts on your screen — including **covered and exposed** regions separately — with content-aware blur/pixelate, custom labels/stickers, and smooth high-refresh tracking.
 
-**Local Xcode is not required.** The project is defined with [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`project.yml`) and compiled by GitHub Actions. Download the `.app` artifact from the workflow run.
+**License: AGPL-3.0** (includes NudeNet-derived Core ML weights). See [`LICENSE`](LICENSE).
 
-## Features (scaffold)
+**Local Xcode is not required.** Build via GitHub Actions and download the **DMG** artifact.
 
-- Menu bar controls (`MenuBarExtra`) for targets, censor style, and performance mode
-- Transparent click-through `NSPanel` overlay above other apps
-- `ScreenCaptureKit` capture with overlay window exclusion (flicker prevention)
-- Vision face / landmark detection on a background queue
-- Optional Core ML intimate-zone model (`Resources/Models/IntimateZones.mlmodelc`)
-- Frame dropping when detection falls behind
+## Why this exists
+
+| Tool | Gap |
+| --- | --- |
+| NudeNix | Python overlay; limited native polish |
+| SafeVision | ONNX / multi-process, not a native macOS menu-bar product |
+| ScreenSeal / Cloaky | Manual masks only |
+
+ScreenCensor Pro ships as a native SwiftUI + AppKit overlay with NudeNet-class labels, Vision pose assist, Metal/CI region effects, and per-part rules.
+
+## Features
+
+- **18 NudeNet body-part classes** with independent Covered / Exposed toggles
+- **Vision assists**: face landmarks, hand pose, ankle/feet pose fallback
+- **Per-part effects**: blur, pixelate, solid box, color wash, custom label + emoji, SF Symbol stickers
+- **Animations**: pulse, shake, stamp-in, scanline
+- **Tracking**: label + IoU matching, EMA smoothing, coast-on-miss
+- **Performance**: 30 / 60 / 120 FPS capture modes with detection resolution scaling
+- **Privacy**: zero network calls in the app; Screen Recording stays on-device
+
+## Download (GitHub Actions)
+
+1. Open [Actions](../../actions) → latest green **Build ScreenCensor**
+2. Download **ScreenCensor-macOS-dmg**
+3. Open the DMG → drag **ScreenCensor** to Applications
+
+### First launch (ad-hoc signature)
+
+This CI build is **ad-hoc signed**, not Apple-notarized. Gatekeeper will warn until you clear quarantine:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/ScreenCensor.app
+```
+
+Then **right-click → Open** once, and grant **Screen Recording** when prompted.
+
+Developer ID + notarization can be added later with paid Apple certificates.
+
+## Usage
+
+1. Click the menu bar icon → **Parts** tab → choose body parts
+2. **Effects** tab → blur strength / labels / stickers / animations
+3. **Motion** tab → FPS mode and smoothing
+4. **Start Censoring**
 
 ## Repository layout
 
 ```text
 project.yml
+Scripts/convert_nudenet_coreml.py
+Sources/App|UI|Overlay|Capture|ML
+Resources/Assets.xcassets
+Resources/Models/   # NudeNet Core ML produced in CI
 .github/workflows/build.yml
-Sources/
-  App/          # app entry, state, coordinator
-  UI/           # SwiftUI menu bar panel
-  Overlay/      # AppKit transparent overlay
-  Capture/      # ScreenCaptureKit stream
-  ML/           # Vision + optional Core ML
-Resources/
-  ScreenCensor.entitlements
-  Models/README.md
+LICENSE             # AGPL-3.0
 ```
 
-## Build with GitHub Actions (recommended)
+## Build workflow
 
-1. Push this repository to GitHub.
-2. Open the **Actions** tab and wait for **Build ScreenCensor** to finish.
-3. Download the **ScreenCensor-macOS** artifact (`ScreenCensor.app`).
-4. Unzip the artifact and move `ScreenCensor.app` somewhere convenient (for example `~/Applications`).
+1. Checkout
+2. Select Xcode 16.x
+3. Convert NudeNet 320n → Core ML into `Resources/Models`
+4. `xcodegen generate` + `xcodebuild`
+5. Package `.app` + `.dmg` artifacts
 
-### First launch (Gatekeeper + ad-hoc signing)
+## Attribution
 
-The CI build uses **ad-hoc signing** (`CODE_SIGN_IDENTITY="-"`), so Gatekeeper will block a normal double-click until you allow it:
+- **NudeNet** — [notAI-tech/NudeNet](https://github.com/notAI-tech/NudeNet) (AGPL-3.0), YOLOv8-based 320n weights
+- Apple **Vision** / **ScreenCaptureKit** / **Core ML**
 
-```bash
-xattr -dr com.apple.quarantine ~/Applications/ScreenCensor.app
-codesign --force --deep --sign - ~/Applications/ScreenCensor.app
-open ~/Applications/ScreenCensor.app
-```
+## AGPL notice
 
-If macOS still blocks the app: **System Settings → Privacy & Security** → allow the blocked app, then reopen.
-
-### Screen Recording permission
-
-1. Open the ScreenCensor menu bar item.
-2. Click **Permission**.
-3. Enable ScreenCensor under **System Settings → Privacy & Security → Screen Recording**.
-4. Click **Start Censoring**.
-
-Capture never leaves the device. There are no network calls in this app.
-
-## Optional: generate project from the command line
-
-If you have command-line developer tools available, you can generate the project from Terminal:
-
-```bash
-brew install xcodegen
-xcodegen generate
-```
-
-Full compilation is expected on the GitHub-hosted `macos-14` runner via `.github/workflows/build.yml`.
-
-## Adding an intimate-zone Core ML model
-
-Face detection works without an extra model. To enable intimate-zone detection:
-
-1. Add `Resources/Models/IntimateZones.mlmodel` or `IntimateZones.mlmodelc`.
-2. Ensure outputs are Vision-compatible recognized-object bounding boxes.
-3. Rebuild via GitHub Actions.
-
-See [`Resources/Models/README.md`](Resources/Models/README.md) for the bounding-box contract.
-
-## Architecture
-
-```text
-MenuBarView / AppModel
-        │
-        ▼
- CensorCoordinator ──► OverlayWindowController (NSPanel + CALayer)
-        │
-        ├── ScreenCaptureManager (SCStream, excludes overlay windowID)
-        │
-        └── DetectionEngine (Vision / optional CoreML, background queue)
-```
-
-### Flicker prevention
-
-`SCContentFilter` is created with the overlay's `CGWindowID` in `excludingWindows`. If the overlay were captured, the model would detect its own censor layers and oscillate.
-
-### Threading
-
-| Work | Thread |
-| --- | --- |
-| SwiftUI / overlay layer updates | MainActor |
-| Screen capture callbacks | capture queue |
-| Vision / Core ML | detection queue |
-
-Image buffers are processed and released immediately. Concurrent frames are dropped when the detector is busy.
-
-## Strict constraints honored
-
-- No local Xcode install required
-- Zero cloud / network usage in app code
-- Capture + detection off the main thread
-- Optional Core ML resource; app compiles without it
+This program is free software under the GNU Affero General Public License v3.0. If you modify and convey it (including offering it as a network service), you must provide corresponding source under AGPL-3.0. Bundling NudeNet weights inherits those obligations.

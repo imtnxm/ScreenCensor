@@ -51,12 +51,13 @@ final class ScreenCaptureManager: NSObject {
         let excludedWindows = content.windows.filter { $0.windowID == windowID }
         let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
 
+        let scale = configuration.performanceMode.detectionScale
         let streamConfig = SCStreamConfiguration()
         streamConfig.capturesAudio = false
         streamConfig.showsCursor = false
         streamConfig.queueDepth = configuration.performanceMode.queueDepth
-        streamConfig.width = display.width
-        streamConfig.height = display.height
+        streamConfig.width = max(640, Int(Double(display.width) * scale))
+        streamConfig.height = max(360, Int(Double(display.height) * scale))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.colorSpaceName = CGColorSpace.sRGB
 
@@ -80,7 +81,6 @@ final class ScreenCaptureManager: NSObject {
         do {
             try await stream.stopCapture()
         } catch {
-            // Best-effort stop; report but clear local state either way.
             delegate?.screenCaptureManager(self, didFail: error)
         }
 
@@ -104,7 +104,6 @@ extension ScreenCaptureManager: SCStreamOutput {
         guard type == .screen else { return }
         guard sampleBuffer.isValid else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        // Retain the pixel buffer independently of the transient sample buffer.
         delegate?.screenCaptureManager(self, didOutput: pixelBuffer)
     }
 }

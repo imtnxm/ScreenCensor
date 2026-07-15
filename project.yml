@@ -25,6 +25,8 @@ targets:
       - path: Sources
         excludes:
           - "**/.DS_Store"
+      - path: Resources/Assets.xcassets
+        type: assetCatalog
       - path: Resources
         buildPhase: resources
         excludes:
@@ -32,26 +34,27 @@ targets:
           - "ScreenCensor.entitlements"
           - "Models/README.md"
           - "Models/.gitkeep"
+          - "Assets.xcassets"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.screencensor.app
         PRODUCT_NAME: ScreenCensor
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: ScreenCensor
+        INFOPLIST_KEY_CFBundleDisplayName: ScreenCensor Pro
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_LSMinimumSystemVersion: "14.0"
         INFOPLIST_KEY_LSUIElement: YES
-        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 ScreenCensor"
-        INFOPLIST_KEY_NSScreenCaptureUsageDescription: "ScreenCensor needs Screen Recording access to detect and censor content in real time on your display. Capture stays on-device and is never uploaded."
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 ScreenCensor. Licensed under AGPL-3.0."
+        INFOPLIST_KEY_NSScreenCaptureUsageDescription: "ScreenCensor needs Screen Recording access to detect and censor body parts in real time on your display. Capture stays on-device and is never uploaded."
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_ENTITLEMENTS: Resources/ScreenCensor.entitlements
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     entitlements:
       path: Resources/ScreenCensor.entitlements
     scheme:

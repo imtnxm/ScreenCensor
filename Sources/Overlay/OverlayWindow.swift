@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import CoreVideo
 import QuartzCore
 
 @MainActor
@@ -7,11 +8,9 @@ final class OverlayWindowController {
     private let panel: NSPanel
     private let rootLayer = CALayer()
     private var contentLayers: [UUID: CALayer] = [:]
-    private var currentStyle: CensorStyle = .blur
-    private var censorText = "CENSORED"
-
-    private let blurFilter: CIFilter? = CIFilter(name: "CIGaussianBlur")
-    private let pixellateFilter: CIFilter? = CIFilter(name: "CIPixellate")
+    private let effectRenderer = EffectRenderer()
+    private var lastPixelBuffer: CVPixelBuffer?
+    private var displaySize: CGSize = .zero
 
     init() {
         panel = NSPanel(
@@ -38,21 +37,16 @@ final class OverlayWindowController {
     func hide() {
         panel.orderOut(nil)
         clearDetections()
+        lastPixelBuffer = nil
     }
 
-    func updateStyle(_ style: CensorStyle, text: String) {
-        currentStyle = style
-        censorText = text
-        // Force rebuild so style changes apply immediately.
-        let snapshot = contentLayers.map { (id: $0.key, frame: $0.value.frame) }
-        clearDetections()
-        for item in snapshot {
-            upsertLayer(id: item.id, frame: item.frame)
-        }
+    func updateFrameContext(pixelBuffer: CVPixelBuffer?, displaySize: CGSize) {
+        lastPixelBuffer = pixelBuffer
+        self.displaySize = displaySize
     }
 
-    func render(screenRects: [(id: UUID, rect: CGRect)]) {
-        let incoming = Set(screenRects.map(\.id))
+    func render(regions: [TrackedRegion]) {
+        let incoming = Set(regions.map(\.id))
         let existing = Set(contentLayers.keys)
 
         for id in existing.subtracting(incoming) {
@@ -60,8 +54,11 @@ final class OverlayWindowController {
             contentLayers.removeValue(forKey: id)
         }
 
-        for item in screenRects {
-            upsertLayer(id: item.id, frame: item.rect)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let size = displaySize.width > 0 ? displaySize : (NSScreen.main?.frame.size ?? .zero)
+
+        for region in regions {
+            upsertLayer(region: region, displaySize: size, scaleFactor: scale)
         }
     }
 
@@ -97,37 +94,15 @@ final class OverlayWindowController {
         guard let screen = NSScreen.main else { return }
         panel.setFrame(screen.frame, display: true)
         rootLayer.frame = CGRect(origin: .zero, size: screen.frame.size)
+        displaySize = screen.frame.size
     }
 
-    private func upsertLayer(id: UUID, frame: CGRect) {
-        let layer = contentLayers[id] ?? makeLayer(for: currentStyle)
-        layer.frame = frame
-        applyStyle(to: layer)
-
-        if contentLayers[id] == nil {
-            rootLayer.addSublayer(layer)
-            contentLayers[id] = layer
-        }
-    }
-
-    private func makeLayer(for style: CensorStyle) -> CALayer {
-        switch style {
-        case .box, .blur, .pixelate:
-            return CALayer()
-        case .text:
-            let textLayer = CATextLayer()
-            textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-            textLayer.alignmentMode = .center
-            textLayer.foregroundColor = NSColor.white.cgColor
-            textLayer.font = NSFont.boldSystemFont(ofSize: 14)
-            textLayer.fontSize = 14
-            return textLayer
-        }
-    }
-
-    private func applyStyle(to layer: CALayer) {
+    private func upsertLayer(region: TrackedRegion, displaySize: CGSize, scaleFactor: CGFloat) {
+        let layer = contentLayers[region.id] ?? CALayer()
+        layer.frame = region.screenRect
         layer.cornerRadius = 6
         layer.masksToBounds = true
+        layer.contentsGravity = .resize
         layer.actions = [
             "bounds": NSNull(),
             "position": NSNull(),
@@ -135,36 +110,62 @@ final class OverlayWindowController {
             "contents": NSNull()
         ]
 
-        switch currentStyle {
-        case .box:
+        if let image = effectRenderer.renderPatch(
+            pixelBuffer: lastPixelBuffer,
+            screenRect: region.screenRect,
+            displaySize: displaySize,
+            effect: region.effect,
+            scaleFactor: scaleFactor
+        ) {
+            layer.contents = image
+            layer.backgroundColor = NSColor.clear.cgColor
+        } else {
+            layer.contents = nil
             layer.backgroundColor = NSColor.black.withAlphaComponent(0.85).cgColor
-            layer.filters = nil
-            if let textLayer = layer as? CATextLayer {
-                textLayer.string = nil
-            }
+        }
 
-        case .blur:
-            layer.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
-            blurFilter?.setValue(18.0, forKey: kCIInputRadiusKey)
-            layer.filters = blurFilter.map { [$0] }
-            if let textLayer = layer as? CATextLayer {
-                textLayer.string = nil
-            }
+        applyAnimation(region.effect.animation, to: layer)
 
-        case .pixelate:
-            layer.backgroundColor = NSColor.gray.withAlphaComponent(0.55).cgColor
-            pixellateFilter?.setValue(12.0, forKey: kCIInputScaleKey)
-            layer.filters = pixellateFilter.map { [$0] }
-            if let textLayer = layer as? CATextLayer {
-                textLayer.string = nil
-            }
+        if contentLayers[region.id] == nil {
+            rootLayer.addSublayer(layer)
+            contentLayers[region.id] = layer
+        }
+    }
 
-        case .text:
-            layer.backgroundColor = NSColor.black.withAlphaComponent(0.8).cgColor
-            layer.filters = nil
-            if let textLayer = layer as? CATextLayer {
-                textLayer.string = censorText
-            }
+    private func applyAnimation(_ animation: OverlayAnimation, to layer: CALayer) {
+        layer.removeAllAnimations()
+        switch animation {
+        case .none:
+            break
+        case .pulse:
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 0.75
+            anim.toValue = 1.0
+            anim.duration = 0.55
+            anim.autoreverses = true
+            anim.repeatCount = .infinity
+            layer.add(anim, forKey: "pulse")
+        case .shake:
+            let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
+            anim.values = [0, -3, 3, -2, 2, 0]
+            anim.duration = 0.35
+            anim.repeatCount = .infinity
+            layer.add(anim, forKey: "shake")
+        case .stampIn:
+            let anim = CABasicAnimation(keyPath: "transform.scale")
+            anim.fromValue = 1.25
+            anim.toValue = 1.0
+            anim.duration = 0.18
+            anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(anim, forKey: "stamp")
+        case .scanline:
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 0.55
+            anim.toValue = 1.0
+            anim.duration = 0.28
+            anim.autoreverses = true
+            anim.repeatCount = .infinity
+            layer.add(anim, forKey: "scan")
         }
     }
 }

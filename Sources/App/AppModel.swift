@@ -11,13 +11,30 @@ final class AppModel: ObservableObject {
     @Published var permissionGranted = false
     @Published var framesProcessed: UInt64 = 0
     @Published var activeDetectionCount = 0
+    @Published var measuredFPS: Double = 0
+    @Published var modelLoaded = false
     @Published var lastError: String?
+    @Published var selectedTab: SettingsTab = .parts
 
     private let coordinator = CensorCoordinator()
     private var cancellables = Set<AnyCancellable>()
 
+    enum SettingsTab: String, CaseIterable, Identifiable {
+        case parts, effects, motion, status
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .parts: return "Parts"
+            case .effects: return "Effects"
+            case .motion: return "Motion"
+            case .status: return "Status"
+            }
+        }
+    }
+
     init() {
         bindCoordinator()
+        modelLoaded = coordinator.modelLoaded
         Task {
             await refreshPermissionStatus()
         }
@@ -25,7 +42,6 @@ final class AppModel: ObservableObject {
 
     func refreshPermissionStatus() async {
         do {
-            // Touching shareable content forces the TCC prompt when needed.
             _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             permissionGranted = CGPreflightScreenCaptureAccess()
             if permissionGranted {
@@ -73,6 +89,7 @@ final class AppModel: ObservableObject {
             try await coordinator.start(configuration: configuration)
             isRunning = true
             statusMessage = "Censoring"
+            modelLoaded = coordinator.modelLoaded
         } catch {
             isRunning = false
             lastError = error.localizedDescription
@@ -84,11 +101,15 @@ final class AppModel: ObservableObject {
         await coordinator.stop()
         isRunning = false
         activeDetectionCount = 0
+        measuredFPS = 0
         statusMessage = permissionGranted ? "Ready" : "Screen Recording permission required"
     }
 
-    func applyConfiguration() {
-        coordinator.updateConfiguration(configuration)
+    func binding(for part: BodyPartID) -> Binding<BodyPartRule> {
+        Binding(
+            get: { self.configuration.rule(for: part) },
+            set: { self.configuration.updateRule($0) }
+        )
     }
 
     private func bindCoordinator() {
@@ -103,6 +124,14 @@ final class AppModel: ObservableObject {
         coordinator.$lastError
             .receive(on: RunLoop.main)
             .assign(to: &$lastError)
+
+        coordinator.$modelLoaded
+            .receive(on: RunLoop.main)
+            .assign(to: &$modelLoaded)
+
+        coordinator.$measuredFPS
+            .receive(on: RunLoop.main)
+            .assign(to: &$measuredFPS)
 
         $configuration
             .dropFirst()

@@ -23,8 +23,6 @@ jobs:
           echo "Available Xcode versions:"
           ls /Applications | grep -i xcode || true
 
-          # Prefer Xcode 16.x so xcodebuild can read project format 77
-          # produced by current XcodeGen on Homebrew.
           SELECTED=""
           for candidate in \
             "/Applications/Xcode_16.4.app" \
@@ -49,6 +47,16 @@ jobs:
           sudo xcode-select -s "${SELECTED}/Contents/Developer"
           xcodebuild -version
           swift --version
+
+      - name: Convert NudeNet 320n to Core ML
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 Scripts/convert_nudenet_coreml.py \
+            --work-dir build/model-work \
+            --out-dir Resources/Models
+          ls -la Resources/Models || true
+        continue-on-error: true
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -83,13 +91,43 @@ jobs:
 
           echo "Built app at: ${APP_PATH}"
           ditto "${APP_PATH}" "artifacts/ScreenCensor.app"
+          codesign --force --deep --sign - "artifacts/ScreenCensor.app"
           codesign -dv --verbose=2 "artifacts/ScreenCensor.app" || true
-          ls -la artifacts
+
+          # Build a drag-and-drop DMG
+          mkdir -p build/dmgroot
+          ditto "artifacts/ScreenCensor.app" "build/dmgroot/ScreenCensor.app"
+          ln -sf /Applications "build/dmgroot/Applications"
+          cat > build/dmgroot/HOW_TO_OPEN.txt <<'EOF'
+          ScreenCensor is ad-hoc signed (not notarized).
+          After download:
+            1. Open the DMG and drag ScreenCensor to Applications
+            2. Run: xattr -dr com.apple.quarantine /Applications/ScreenCensor.app
+            3. Right-click ScreenCensor.app → Open (first launch)
+            4. Grant Screen Recording permission when prompted
+          EOF
+
+          hdiutil create \
+            -volname "ScreenCensor" \
+            -srcfolder build/dmgroot \
+            -ov \
+            -format UDZO \
+            "artifacts/ScreenCensor.dmg"
+
+          ls -lah artifacts
 
       - name: Upload ScreenCensor.app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenCensor-macOS
+          name: ScreenCensor-macOS-app
           path: artifacts/ScreenCensor.app
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload ScreenCensor.dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenCensor-macOS-dmg
+          path: artifacts/ScreenCensor.dmg
           if-no-files-found: error
           retention-days: 14

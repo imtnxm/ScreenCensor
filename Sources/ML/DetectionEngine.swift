@@ -12,9 +12,11 @@ final class DetectionEngine {
     private var coreMLModel: VNCoreMLModel?
     private var isProcessing = false
     private var framesProcessed: UInt64 = 0
+    private(set) var modelLoaded = false
 
     init() {
-        coreMLModel = Self.loadOptionalIntimateZonesModel()
+        coreMLModel = Self.loadNudeNetModel()
+        modelLoaded = coreMLModel != nil
     }
 
     var processedFrameCount: UInt64 {
@@ -77,14 +79,21 @@ final class DetectionEngine {
         var collected: [DetectionResult] = []
         let collectLock = NSLock()
 
-        if configuration.targets.face {
+        let needsFace = configuration.rule(for: .faceFemale).enabled
+            || configuration.rule(for: .faceMale).enabled
+            || (configuration.useFaceLandmarks && configuration.rule(for: .faceLandmarks).enabled)
+
+        if needsFace {
             let faceRequest = VNDetectFaceRectanglesRequest { request, _ in
                 guard let observations = request.results as? [VNFaceObservation] else { return }
-                let mapped = observations.map { observation in
+                let mapped: [DetectionResult] = observations.map { observation in
+                    // NudeNet also returns gendered faces; Vision faces map to both face parts.
                     DetectionResult(
-                        kind: .face,
+                        part: .faceFemale,
+                        source: .visionFace,
                         normalizedRect: observation.boundingBox,
-                        confidence: observation.confidence
+                        confidence: observation.confidence,
+                        label: "FACE_VISION"
                     )
                 }
                 collectLock.lock()
@@ -94,65 +103,45 @@ final class DetectionEngine {
             faceRequest.revision = VNDetectFaceRectanglesRequestRevision3
             requests.append(faceRequest)
 
-            let landmarksRequest = VNDetectFaceLandmarksRequest { request, _ in
-                guard let observations = request.results as? [VNFaceObservation] else { return }
-                var landmarkBoxes: [DetectionResult] = []
-                for observation in observations {
-                    guard let landmarks = observation.landmarks else { continue }
-                    let regions = [landmarks.leftEye, landmarks.rightEye, landmarks.outerLips].compactMap { $0 }
-                    for region in regions {
-                        let box = Self.boundingBox(for: region.normalizedPoints, in: observation.boundingBox)
-                        landmarkBoxes.append(
-                            DetectionResult(
-                                kind: .faceLandmarks,
-                                normalizedRect: box,
-                                confidence: observation.confidence
+            if configuration.useFaceLandmarks && configuration.rule(for: .faceLandmarks).enabled {
+                let landmarksRequest = VNDetectFaceLandmarksRequest { request, _ in
+                    guard let observations = request.results as? [VNFaceObservation] else { return }
+                    var landmarkBoxes: [DetectionResult] = []
+                    for observation in observations {
+                        guard let landmarks = observation.landmarks else { continue }
+                        let regions = [landmarks.leftEye, landmarks.rightEye, landmarks.outerLips].compactMap { $0 }
+                        for region in regions {
+                            let box = Self.boundingBox(for: region.normalizedPoints, in: observation.boundingBox)
+                            landmarkBoxes.append(
+                                DetectionResult(
+                                    part: .faceLandmarks,
+                                    source: .visionLandmarks,
+                                    normalizedRect: box,
+                                    confidence: observation.confidence
+                                )
                             )
-                        )
+                        }
                     }
+                    collectLock.lock()
+                    collected.append(contentsOf: landmarkBoxes)
+                    collectLock.unlock()
                 }
-                collectLock.lock()
-                collected.append(contentsOf: landmarkBoxes)
-                collectLock.unlock()
+                requests.append(landmarksRequest)
             }
-            requests.append(landmarksRequest)
         }
 
-        // Skin detection is a lightweight placeholder using face regions expanded slightly.
-        // A dedicated skin-segmentation model can replace this later without changing the coordinator API.
-        if configuration.targets.skin && configuration.targets.face == false {
-            let skinProxy = VNDetectFaceRectanglesRequest { request, _ in
-                guard let observations = request.results as? [VNFaceObservation] else { return }
-                let mapped = observations.map { observation -> DetectionResult in
-                    let inset = observation.boundingBox.insetBy(
-                        dx: -observation.boundingBox.width * 0.15,
-                        dy: -observation.boundingBox.height * 0.2
-                    )
-                    return DetectionResult(
-                        kind: .skin,
-                        normalizedRect: Self.clampNormalized(inset),
-                        confidence: observation.confidence * 0.5,
-                        label: "skin-proxy"
-                    )
-                }
-                collectLock.lock()
-                collected.append(contentsOf: mapped)
-                collectLock.unlock()
-            }
-            requests.append(skinProxy)
-        } else if configuration.targets.skin {
-            // When face detection already runs, expand those boxes after the joint request execution.
-        }
-
-        if configuration.targets.intimateZones, let model {
+        if let model {
             let mlRequest = VNCoreMLRequest(model: model) { request, _ in
-                guard let observations = request.results as? [VNRecognizedObjectObservation] else { return }
-                let mapped = observations.map { observation in
-                    DetectionResult(
-                        kind: .intimateZone,
+                let observations = (request.results as? [VNRecognizedObjectObservation]) ?? []
+                let mapped = observations.compactMap { observation -> DetectionResult? in
+                    guard let label = observation.labels.first?.identifier,
+                          let part = BodyPartID.fromNudeNetLabel(label) else { return nil }
+                    return DetectionResult(
+                        part: part,
+                        source: .nudeNet,
                         normalizedRect: observation.boundingBox,
                         confidence: observation.confidence,
-                        label: observation.labels.first?.identifier
+                        label: label
                     )
                 }
                 collectLock.lock()
@@ -163,38 +152,55 @@ final class DetectionEngine {
             requests.append(mlRequest)
         }
 
+        if configuration.usePoseAssist {
+            if configuration.rule(for: .hands).enabled {
+                let handRequest = VNDetectHumanHandPoseRequest { request, _ in
+                    guard let observations = request.results as? [VNHumanHandPoseObservation] else { return }
+                    let boxes = PoseAssist.handBoxes(from: observations)
+                    collectLock.lock()
+                    collected.append(contentsOf: boxes)
+                    collectLock.unlock()
+                }
+                handRequest.maximumHandCount = 4
+                requests.append(handRequest)
+            }
+
+            let feetEnabled = configuration.rule(for: .feetPose).enabled
+                || configuration.rule(for: .feetCovered).enabled
+                || configuration.rule(for: .feetExposed).enabled
+            if feetEnabled {
+                let bodyRequest = VNDetectHumanBodyPoseRequest { request, _ in
+                    guard let observations = request.results as? [VNHumanBodyPoseObservation] else { return }
+                    let boxes = PoseAssist.feetBoxes(from: observations)
+                    collectLock.lock()
+                    collected.append(contentsOf: boxes)
+                    collectLock.unlock()
+                }
+                requests.append(bodyRequest)
+            }
+        }
+
         let handler = VNImageRequestHandler(cvPixelBuffer: imageBuffer, orientation: .up, options: [:])
         if !requests.isEmpty {
             try handler.perform(requests)
         }
 
-        if configuration.targets.skin && configuration.targets.face {
-            let faceBoxes = collected.filter { $0.kind == .face }
-            let skinBoxes = faceBoxes.map { face -> DetectionResult in
-                let inset = face.normalizedRect.insetBy(
-                    dx: -face.normalizedRect.width * 0.15,
-                    dy: -face.normalizedRect.height * 0.2
-                )
-                return DetectionResult(
-                    kind: .skin,
-                    normalizedRect: Self.clampNormalized(inset),
-                    confidence: face.confidence * 0.5,
-                    label: "skin-proxy"
-                )
-            }
-            collected.append(contentsOf: skinBoxes)
-        }
+        let filtered = PartRuleEngine.filter(collected, configuration: configuration)
 
         return FrameDetections(
             timestamp: timestamp,
             displaySize: displaySize,
-            results: collected
+            pixelBuffer: imageBuffer,
+            results: filtered
         )
     }
 
-    private static func loadOptionalIntimateZonesModel() -> VNCoreMLModel? {
+    private static func loadNudeNetModel() -> VNCoreMLModel? {
         let bundle = Bundle.main
         let candidates: [(String, String)] = [
+            ("NudeNet320n", "mlmodelc"),
+            ("NudeNet320n", "mlpackage"),
+            ("NudeNet320n", "mlmodel"),
             ("IntimateZones", "mlmodelc"),
             ("IntimateZones", "mlmodel")
         ]
@@ -204,6 +210,8 @@ final class DetectionEngine {
             do {
                 let compiledURL: URL
                 if ext == "mlmodel" {
+                    compiledURL = try MLModel.compileModel(at: url)
+                } else if ext == "mlpackage" {
                     compiledURL = try MLModel.compileModel(at: url)
                 } else {
                     compiledURL = url
@@ -229,7 +237,6 @@ final class DetectionEngine {
             return faceBox
         }
 
-        // Landmark points are normalized relative to the face bounding box.
         let absolute = CGRect(
             x: faceBox.origin.x + minX * faceBox.width,
             y: faceBox.origin.y + minY * faceBox.height,
@@ -238,14 +245,6 @@ final class DetectionEngine {
         )
 
         let padded = absolute.insetBy(dx: -absolute.width * 0.35, dy: -absolute.height * 0.35)
-        return clampNormalized(padded)
-    }
-
-    private static func clampNormalized(_ rect: CGRect) -> CGRect {
-        let x = max(0, min(1, rect.origin.x))
-        let y = max(0, min(1, rect.origin.y))
-        let maxX = max(0, min(1, rect.origin.x + rect.size.width))
-        let maxY = max(0, min(1, rect.origin.y + rect.size.height))
-        return CGRect(x: x, y: y, width: max(0, maxX - x), height: max(0, maxY - y))
+        return PartRuleEngine.clampNormalized(padded)
     }
 }

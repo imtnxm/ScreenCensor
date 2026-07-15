@@ -1,27 +1,33 @@
 # Core ML Models
 
-Place compiled Core ML resources here so XcodeGen can copy them into the app bundle.
+## Bundled detector (CI)
 
-## Expected resource
+GitHub Actions runs `Scripts/convert_nudenet_coreml.py` to download **NudeNet 320n** weights and export `NudeNet320n.mlpackage` into this folder before `xcodegen` / `xcodebuild`.
 
 | Field | Value |
 | --- | --- |
-| File name | `IntimateZones.mlmodelc` **or** `IntimateZones.mlmodel` |
-| Bundle lookup | `Bundle.main.url(forResource: "IntimateZones", withExtension: "mlmodelc")` falls back to `.mlmodel` |
-| Output contract | object-detection style bounding boxes consumed by `VNCoreMLRequest` / `VNRecognizedObjectObservation` |
+| Source | [notAI-tech/NudeNet](https://github.com/notAI-tech/NudeNet) v3.4 `320n.pt` |
+| License | AGPL-3.0 (this app is also AGPL-3.0) |
+| Bundle name | `NudeNet320n.mlpackage` or `NudeNet320n.mlmodel` / `.mlmodelc` |
+| Classes | 18 NudeNet labels (covered/exposed body parts, faces, feet, …) |
 
-## Bounding-box contract
+## Labels expected by `DetectionEngine`
 
-Intimate-zone detections must be produced as Vision-normalized rectangles in the bottom-left origin space that Vision already uses:
+```
+FACE_FEMALE, FACE_MALE,
+FEMALE_BREAST_COVERED, FEMALE_BREAST_EXPOSED, MALE_BREAST_EXPOSED,
+FEMALE_GENITALIA_COVERED, FEMALE_GENITALIA_EXPOSED, MALE_GENITALIA_EXPOSED,
+ANUS_COVERED, ANUS_EXPOSED,
+BUTTOCKS_COVERED, BUTTOCKS_EXPOSED,
+BELLY_COVERED, BELLY_EXPOSED,
+ARMPITS_COVERED, ARMPITS_EXPOSED,
+FEET_COVERED, FEET_EXPOSED
+```
 
-- `x`, `y`, `width`, `height` ∈ `[0, 1]`
-- origin at the **bottom-left** of the image
-- labels are free-form strings; the app treats every recognized object as an intimate-zone candidate when the Intimate Zones toggle is enabled
+If no model is present, Vision face/hand/body pose paths still run; Status will show **Vision Only**.
 
-`DetectionEngine` maps those normalized boxes into AppKit screen coordinates before the overlay renders.
+## Local conversion
 
-## Notes
-
-- Face detection works without this model via built-in Vision requests.
-- If no model resource is present, intimate-zone inference is skipped and the app still compiles and runs.
-- Keep models on-device only. Do not add network download code.
+```bash
+python3 Scripts/convert_nudenet_coreml.py --work-dir /tmp/nn --out-dir Resources/Models
+```

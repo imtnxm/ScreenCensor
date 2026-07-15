@@ -10,6 +10,8 @@ final class CensorCoordinator: ObservableObject {
     @Published private(set) var framesProcessed: UInt64 = 0
     @Published private(set) var activeDetectionCount = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var modelLoaded = false
+    @Published private(set) var measuredFPS: Double = 0
 
     private let overlay = OverlayWindowController()
     private let captureManager = ScreenCaptureManager()
@@ -17,19 +19,21 @@ final class CensorCoordinator: ObservableObject {
 
     private var configuration = CensorConfiguration()
     private var isRunning = false
-    private var smoothedRects: [UUID: SmoothedRect] = [:]
-    private let smoothingFactor: CGFloat = 0.35
+    private var tracks: [TrackKey: TrackState] = [:]
+    private var fpsWindowStart = CACurrentMediaTime()
+    private var fpsFrameCount = 0
 
     init() {
         captureManager.delegate = self
+        modelLoaded = detectionEngine.modelLoaded
     }
 
     func start(configuration: CensorConfiguration) async throws {
         self.configuration = configuration
         detectionEngine.updateConfiguration(configuration)
         captureManager.updateConfiguration(configuration)
-        overlay.updateStyle(configuration.style, text: configuration.censorText)
         overlay.show()
+        modelLoaded = detectionEngine.modelLoaded
 
         do {
             try await captureManager.start(excludingWindowID: overlay.windowID)
@@ -47,8 +51,9 @@ final class CensorCoordinator: ObservableObject {
         isRunning = false
         await captureManager.stop()
         overlay.hide()
-        smoothedRects.removeAll()
+        tracks.removeAll()
         activeDetectionCount = 0
+        measuredFPS = 0
     }
 
     func updateConfiguration(_ configuration: CensorConfiguration) {
@@ -56,7 +61,6 @@ final class CensorCoordinator: ObservableObject {
         self.configuration = configuration
         detectionEngine.updateConfiguration(configuration)
         captureManager.updateConfiguration(configuration)
-        overlay.updateStyle(configuration.style, text: configuration.censorText)
 
         guard isRunning, performanceChanged else { return }
         Task {
@@ -72,6 +76,8 @@ final class CensorCoordinator: ObservableObject {
         guard isRunning else { return }
 
         let displaySize = overlayDisplaySize()
+        overlay.updateFrameContext(pixelBuffer: pixelBuffer, displaySize: displaySize)
+
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -79,6 +85,9 @@ final class CensorCoordinator: ObservableObject {
                     pixelBuffer: pixelBuffer,
                     displaySize: displaySize
                 ) else {
+                    await MainActor.run {
+                        self.renderCoastingOnly()
+                    }
                     return
                 }
 
@@ -95,86 +104,111 @@ final class CensorCoordinator: ObservableObject {
 
     private func apply(frame: FrameDetections) {
         framesProcessed = detectionEngine.processedFrameCount
+        modelLoaded = detectionEngine.modelLoaded
+        overlay.updateFrameContext(pixelBuffer: frame.pixelBuffer, displaySize: frame.displaySize)
+        noteFPS()
 
-        let filtered = frame.results.filter { result in
-            switch result.kind {
-            case .face, .faceLandmarks:
-                return configuration.targets.face
-            case .skin:
-                return configuration.targets.skin
-            case .intimateZone:
-                return configuration.targets.intimateZones
-            }
-        }
+        let now = CACurrentMediaTime()
+        let smoothing = configuration.motion.smoothing
+        let coast = configuration.motion.coastSeconds
 
-        let screenItems: [(id: UUID, rect: CGRect)] = filtered.map { result in
+        var claimed = Set<TrackKey>()
+        var unmatched = tracks
+
+        for detection in frame.results {
+            let padded = PartRuleEngine.paddedRect(
+                detection.normalizedRect,
+                part: detection.part,
+                configuration: configuration
+            )
             let screenRect = CoordinateMapper.screenRect(
-                fromVisionNormalized: result.normalizedRect,
+                fromVisionNormalized: padded,
                 displaySize: frame.displaySize
             )
-            return (result.id, screenRect)
-        }
+            let effect = PartRuleEngine.effect(for: detection.part, configuration: configuration)
 
-        // Match detections across frames by IoU, then smooth to reduce jitter.
-        let stabilized = stabilizeIdentities(screenItems)
-        activeDetectionCount = stabilized.count
-        overlay.render(screenRects: stabilized)
-
-        pruneSmoothedRects(keeping: Set(stabilized.map(\.id)))
-    }
-
-    private func smooth(id: UUID, rect: CGRect) -> CGRect {
-        if let previous = smoothedRects[id] {
-            let blended = CGRect(
-                x: lerp(previous.rect.origin.x, rect.origin.x, smoothingFactor),
-                y: lerp(previous.rect.origin.y, rect.origin.y, smoothingFactor),
-                width: lerp(previous.rect.width, rect.width, smoothingFactor),
-                height: lerp(previous.rect.height, rect.height, smoothingFactor)
-            )
-            smoothedRects[id] = SmoothedRect(rect: blended, lastSeen: CACurrentMediaTime())
-            return blended
-        }
-
-        smoothedRects[id] = SmoothedRect(rect: rect, lastSeen: CACurrentMediaTime())
-        return rect
-    }
-
-    private func stabilizeIdentities(
-        _ items: [(id: UUID, rect: CGRect)]
-    ) -> [(id: UUID, rect: CGRect)] {
-        // Match new detections to previous smoothed rects by IoU to reduce flicker from fresh UUIDs.
-        var available = smoothedRects
-        var output: [(id: UUID, rect: CGRect)] = []
-
-        for item in items {
-            var bestID: UUID?
-            var bestIoU: CGFloat = 0.15
-
-            for (candidateID, candidate) in available {
-                let score = iou(item.rect, candidate.rect)
+            var bestKey: TrackKey?
+            var bestIoU: CGFloat = 0.12
+            for (key, state) in unmatched where key.part == detection.part {
+                let score = iou(screenRect, state.rect)
                 if score > bestIoU {
                     bestIoU = score
-                    bestID = candidateID
+                    bestKey = key
                 }
             }
 
-            if let bestID {
-                available.removeValue(forKey: bestID)
-                let smoothed = smooth(id: bestID, rect: item.rect)
-                output.append((bestID, smoothed))
+            let key = bestKey ?? TrackKey(id: detection.id, part: detection.part)
+            if let bestKey { unmatched.removeValue(forKey: bestKey) }
+
+            let previous = tracks[key]?.rect
+            let blended: CGRect
+            if let previous {
+                blended = CGRect(
+                    x: lerp(previous.origin.x, screenRect.origin.x, smoothing),
+                    y: lerp(previous.origin.y, screenRect.origin.y, smoothing),
+                    width: lerp(previous.width, screenRect.width, smoothing),
+                    height: lerp(previous.height, screenRect.height, smoothing)
+                )
             } else {
-                let smoothed = smooth(id: item.id, rect: item.rect)
-                output.append((item.id, smoothed))
+                blended = screenRect
+            }
+
+            tracks[key] = TrackState(
+                rect: blended,
+                confidence: detection.confidence,
+                effect: effect,
+                lastSeen: now
+            )
+            claimed.insert(key)
+        }
+
+        // Coast stale tracks briefly
+        for (key, state) in tracks {
+            if claimed.contains(key) { continue }
+            if now - state.lastSeen > coast {
+                tracks.removeValue(forKey: key)
             }
         }
 
-        return output
+        let regions: [TrackedRegion] = tracks.map { key, state in
+            TrackedRegion(
+                id: key.id,
+                part: key.part,
+                screenRect: state.rect,
+                confidence: state.confidence,
+                effect: state.effect
+            )
+        }
+
+        activeDetectionCount = regions.count
+        overlay.render(regions: regions)
     }
 
-    private func pruneSmoothedRects(keeping ids: Set<UUID>) {
+    private func renderCoastingOnly() {
         let now = CACurrentMediaTime()
-        smoothedRects = smoothedRects.filter { id, value in
-            ids.contains(id) || (now - value.lastSeen) < 0.25
+        let coast = configuration.motion.coastSeconds
+        tracks = tracks.filter { now - $0.value.lastSeen <= coast }
+        let regions: [TrackedRegion] = tracks.map { key, state in
+            TrackedRegion(
+                id: key.id,
+                part: key.part,
+                screenRect: state.rect,
+                confidence: state.confidence,
+                effect: state.effect
+            )
+        }
+        activeDetectionCount = regions.count
+        overlay.render(regions: regions)
+    }
+
+    private func noteFPS() {
+        fpsFrameCount += 1
+        let now = CACurrentMediaTime()
+        let elapsed = now - fpsWindowStart
+        if elapsed >= 1.0 {
+            measuredFPS = Double(fpsFrameCount) / elapsed
+            fpsFrameCount = 0
+            fpsWindowStart = now
         }
     }
 
@@ -210,13 +244,19 @@ extension CensorCoordinator: ScreenCaptureManagerDelegate {
     }
 }
 
-private struct SmoothedRect {
+private struct TrackKey: Hashable {
+    let id: UUID
+    let part: BodyPartID
+}
+
+private struct TrackState {
     var rect: CGRect
+    var confidence: Float
+    var effect: EffectPreset
     var lastSeen: CFTimeInterval
 }
 
 enum CoordinateMapper {
-    /// Converts Vision's bottom-left normalized coordinates into AppKit screen coordinates (bottom-left origin).
     static func screenRect(fromVisionNormalized rect: CGRect, displaySize: CGSize) -> CGRect {
         CGRect(
             x: rect.origin.x * displaySize.width,
