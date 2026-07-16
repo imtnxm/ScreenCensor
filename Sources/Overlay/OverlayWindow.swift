@@ -1,70 +1,72 @@
 import AppKit
-import CoreImage
 import CoreVideo
+import Metal
 import QuartzCore
 
 @MainActor
 final class OverlayWindowController {
+    let display: DisplayInfo
     private let panel: NSPanel
-    private let rootLayer = CALayer()
-    private var contentLayers: [UUID: CALayer] = [:]
-    private let effectRenderer = EffectRenderer()
-    private var lastPixelBuffer: CVPixelBuffer?
-    private var displaySize: CGSize = .zero
+    private let hostView: MetalHostView
+    private let effectRenderer: EffectRenderer
+    private var layerAnimations: [UUID: OverlayAnimation] = [:]
+    private var lastRegions: [TrackedRegion] = []
 
-    init() {
+    init(display: DisplayInfo, effectRenderer: EffectRenderer = EffectRenderer()) {
+        self.display = display
+        self.effectRenderer = effectRenderer
+
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            contentRect: display.pointFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-
+        hostView = MetalHostView(frame: CGRect(origin: .zero, size: display.pointFrame.size))
         configurePanel()
-        configureRootLayer()
-        syncFrameToPrimaryDisplay()
     }
 
     var windowID: CGWindowID {
         CGWindowID(panel.windowNumber)
     }
 
+    var usingGPUFallback: Bool { effectRenderer.usingGPUFallback }
+
     func show() {
-        syncFrameToPrimaryDisplay()
+        panel.setFrame(display.pointFrame, display: true)
+        hostView.frame = CGRect(origin: .zero, size: display.pointFrame.size)
         panel.orderFrontRegardless()
     }
 
     func hide() {
         panel.orderOut(nil)
-        clearDetections()
-        lastPixelBuffer = nil
+        clear()
     }
 
-    func updateFrameContext(pixelBuffer: CVPixelBuffer?, displaySize: CGSize) {
-        lastPixelBuffer = pixelBuffer
-        self.displaySize = displaySize
+    func clear() {
+        lastRegions = []
+        hostView.clear()
+        layerAnimations.removeAll()
     }
 
-    func render(regions: [TrackedRegion]) {
-        let incoming = Set(regions.map(\.id))
-        let existing = Set(contentLayers.keys)
-
-        for id in existing.subtracting(incoming) {
-            contentLayers[id]?.removeFromSuperlayer()
-            contentLayers.removeValue(forKey: id)
+    func render(pixelBuffer: CVPixelBuffer, geometry: FrameGeometry, regions: [TrackedRegion]) {
+        lastRegions = regions
+        let scale = display.backingScaleFactor
+        effectRenderer.compose(
+            pixelBuffer: pixelBuffer,
+            geometry: geometry,
+            regions: regions,
+            scaleFactor: scale
+        ) { [weak self] image in
+            Task { @MainActor in
+                guard let self else { return }
+                if let image {
+                    self.hostView.present(image: image)
+                } else {
+                    self.hostView.presentFallback(regions: regions, size: self.display.pointFrame.size)
+                }
+            }
         }
-
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let size = displaySize.width > 0 ? displaySize : (NSScreen.main?.frame.size ?? .zero)
-
-        for region in regions {
-            upsertLayer(region: region, displaySize: size, scaleFactor: scale)
-        }
-    }
-
-    func clearDetections() {
-        contentLayers.values.forEach { $0.removeFromSuperlayer() }
-        contentLayers.removeAll()
     }
 
     private func configurePanel() {
@@ -78,94 +80,59 @@ final class OverlayWindowController {
         panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
         panel.sharingType = .none
-
-        let contentView = NSView(frame: panel.frame)
-        contentView.wantsLayer = true
-        contentView.layer = rootLayer
-        panel.contentView = contentView
+        panel.contentView = hostView
+        panel.setFrame(display.pointFrame, display: true)
     }
+}
 
-    private func configureRootLayer() {
-        rootLayer.backgroundColor = NSColor.clear.cgColor
-        rootLayer.masksToBounds = false
-    }
+@MainActor
+final class MetalHostView: NSView {
+    private let imageLayer = CALayer()
 
-    private func syncFrameToPrimaryDisplay() {
-        guard let screen = NSScreen.main else { return }
-        panel.setFrame(screen.frame, display: true)
-        rootLayer.frame = CGRect(origin: .zero, size: screen.frame.size)
-        displaySize = screen.frame.size
-    }
-
-    private func upsertLayer(region: TrackedRegion, displaySize: CGSize, scaleFactor: CGFloat) {
-        let layer = contentLayers[region.id] ?? CALayer()
-        layer.frame = region.screenRect
-        layer.cornerRadius = 6
-        layer.masksToBounds = true
-        layer.contentsGravity = .resize
-        layer.actions = [
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer = CALayer()
+        layer?.backgroundColor = NSColor.clear.cgColor
+        imageLayer.frame = bounds
+        imageLayer.contentsGravity = .resize
+        imageLayer.actions = [
+            "contents": NSNull(),
             "bounds": NSNull(),
-            "position": NSNull(),
-            "frame": NSNull(),
-            "contents": NSNull()
+            "position": NSNull()
         ]
+        layer?.addSublayer(imageLayer)
+    }
 
-        if let image = effectRenderer.renderPatch(
-            pixelBuffer: lastPixelBuffer,
-            screenRect: region.screenRect,
-            displaySize: displaySize,
-            effect: region.effect,
-            scaleFactor: scaleFactor
-        ) {
-            layer.contents = image
-            layer.backgroundColor = NSColor.clear.cgColor
-        } else {
-            layer.contents = nil
-            layer.backgroundColor = NSColor.black.withAlphaComponent(0.85).cgColor
-        }
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-        applyAnimation(region.effect.animation, to: layer)
+    override func layout() {
+        super.layout()
+        imageLayer.frame = bounds
+    }
 
-        if contentLayers[region.id] == nil {
-            rootLayer.addSublayer(layer)
-            contentLayers[region.id] = layer
+    func present(image: CGImage) {
+        imageLayer.contents = image
+        imageLayer.backgroundColor = NSColor.clear.cgColor
+    }
+
+    func presentFallback(regions: [TrackedRegion], size: CGSize) {
+        imageLayer.contents = nil
+        // Lightweight solid boxes if GPU compose fails.
+        imageLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        for region in regions {
+            let box = CALayer()
+            box.frame = region.localRect
+            box.backgroundColor = NSColor.black.withAlphaComponent(0.9).cgColor
+            box.cornerRadius = 6
+            imageLayer.addSublayer(box)
         }
     }
 
-    private func applyAnimation(_ animation: OverlayAnimation, to layer: CALayer) {
-        layer.removeAllAnimations()
-        switch animation {
-        case .none:
-            break
-        case .pulse:
-            let anim = CABasicAnimation(keyPath: "opacity")
-            anim.fromValue = 0.75
-            anim.toValue = 1.0
-            anim.duration = 0.55
-            anim.autoreverses = true
-            anim.repeatCount = .infinity
-            layer.add(anim, forKey: "pulse")
-        case .shake:
-            let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
-            anim.values = [0, -3, 3, -2, 2, 0]
-            anim.duration = 0.35
-            anim.repeatCount = .infinity
-            layer.add(anim, forKey: "shake")
-        case .stampIn:
-            let anim = CABasicAnimation(keyPath: "transform.scale")
-            anim.fromValue = 1.25
-            anim.toValue = 1.0
-            anim.duration = 0.18
-            anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            layer.add(anim, forKey: "stamp")
-        case .scanline:
-            let anim = CABasicAnimation(keyPath: "opacity")
-            anim.fromValue = 0.55
-            anim.toValue = 1.0
-            anim.duration = 0.28
-            anim.autoreverses = true
-            anim.repeatCount = .infinity
-            layer.add(anim, forKey: "scan")
-        }
+    func clear() {
+        imageLayer.contents = nil
+        imageLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
     }
 }

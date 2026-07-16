@@ -14,7 +14,7 @@ struct DetectionResult: Identifiable, Sendable {
     let id: UUID
     let part: BodyPartID
     let source: DetectionSource
-    /// Vision-normalized rect with origin at bottom-left.
+    /// Vision-normalized rect with origin at bottom-left, relative to the captured display content.
     let normalizedRect: CGRect
     let confidence: Float
     let label: String?
@@ -39,15 +39,19 @@ struct DetectionResult: Identifiable, Sendable {
 struct TrackedRegion: Identifiable, Sendable {
     let id: UUID
     let part: BodyPartID
-    let screenRect: CGRect
+    let displayID: CGDirectDisplayID
+    /// Overlay-local rect (origin at display corner, AppKit bottom-left).
+    let localRect: CGRect
+    /// Vision-normalized rect used for buffer cropping.
+    let normalizedRect: CGRect
     let confidence: Float
     let effect: EffectPreset
 }
 
 struct FrameDetections: Sendable {
     let timestamp: CFTimeInterval
-    let displaySize: CGSize
-    /// Pixel buffer retained for content-aware effects (caller must not mutate).
-    let pixelBuffer: CVPixelBuffer?
+    let displayID: CGDirectDisplayID
+    let geometry: FrameGeometry
+    let pixelBuffer: CVPixelBuffer
     let results: [DetectionResult]
 }

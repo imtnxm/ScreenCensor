@@ -1,81 +1,57 @@
 # ScreenCensor Pro
 
-Real-time, on-device macOS menu-bar app that detects and censors body parts on your screen — including **covered and exposed** regions separately — with content-aware blur/pixelate, custom labels/stickers, and smooth high-refresh tracking.
+Real-time, on-device macOS menu-bar censoring with **multi-monitor** capture, **NudeNet** body-part detection, **predictive tracking**, and **content-aware** blur / pixelate / frosted / crystallize overlays.
 
-**License: AGPL-3.0** (includes NudeNet-derived Core ML weights). See [`LICENSE`](LICENSE).
+**License: AGPL-3.0** — see [`LICENSE`](LICENSE). Includes NudeNet-derived Core ML weights.
 
-**Local Xcode is not required.** Build via GitHub Actions and download the **DMG** artifact.
+## What improved in 0.3
 
-## Why this exists
+Inspired by products like [Beta Blocker Mac](https://isla2d.itch.io/beta-blocker-mac) (multi-monitor, per-part effects, performance presets), without cloning proprietary assets:
 
-| Tool | Gap |
-| --- | --- |
-| NudeNix | Python overlay; limited native polish |
-| SafeVision | ONNX / multi-process, not a native macOS menu-bar product |
-| ScreenSeal / Cloaky | Manual masks only |
+- One capture + overlay session **per display** (secondary monitors included)
+- Shared `FrameGeometry` so Vision boxes, AppKit overlays, and Core Image crops stay aligned (Retina + negative-origin displays)
+- Single-pass GPU composition (blur/pixelate all regions from the same filtered frame)
+- Predictive `RegionTracker` with IoU association, velocity coasting, and expand-first safety smoothing
+- Latest-frame mailbox so UI does not spawn unbounded tasks per capture callback
+- Effect presets: strong/soft/frosted blur, mosaic, chunky pixel, crystallize, solid, warning tape, labels, stickers
+- Displays / Effects / Motion tabs, persisted settings, capture/infer/draw FPS meters
 
-ScreenCensor Pro ships as a native SwiftUI + AppKit overlay with NudeNet-class labels, Vision pose assist, Metal/CI region effects, and per-part rules.
+Deferred (not in this release): reverse censoring, popup storms, photo/video export, OBS virtual camera, achievements, Discord status.
 
-## Features
-
-- **18 NudeNet body-part classes** with independent Covered / Exposed toggles
-- **Vision assists**: face landmarks, hand pose, ankle/feet pose fallback
-- **Per-part effects**: blur, pixelate, solid box, color wash, custom label + emoji, SF Symbol stickers
-- **Animations**: pulse, shake, stamp-in, scanline
-- **Tracking**: label + IoU matching, EMA smoothing, coast-on-miss
-- **Performance**: 30 / 60 / 120 FPS capture modes with detection resolution scaling
-- **Privacy**: zero network calls in the app; Screen Recording stays on-device
-
-## Download (GitHub Actions)
+## Download
 
 1. Open [Actions](../../actions) → latest green **Build ScreenCensor**
 2. Download **ScreenCensor-macOS-dmg**
-3. Open the DMG → drag **ScreenCensor** to Applications
-
-### First launch (ad-hoc signature)
-
-This CI build is **ad-hoc signed**, not Apple-notarized. Gatekeeper will warn until you clear quarantine:
+3. Drag to Applications, then:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/ScreenCensor.app
 ```
 
-Then **right-click → Open** once, and grant **Screen Recording** when prompted.
-
-Developer ID + notarization can be added later with paid Apple certificates.
+Right-click → Open once. Grant **Screen Recording**. Ad-hoc signature is not notarized.
 
 ## Usage
 
-1. Click the menu bar icon → **Parts** tab → choose body parts
-2. **Effects** tab → blur strength / labels / stickers / animations
-3. **Motion** tab → FPS mode and smoothing
-4. **Start Censoring**
+1. **Parts** — enable covered/exposed body parts separately  
+2. **Effects** — pick preset, tune blur/pixel/opacity/feather  
+3. **Displays** — enable/disable monitors  
+4. **Motion** — FPS mode, smoothing, coast time  
+5. **Start Censoring**
 
-## Repository layout
+## Build (CI)
 
-```text
-project.yml
-Scripts/convert_nudenet_coreml.py
-Sources/App|UI|Overlay|Capture|ML
-Resources/Assets.xcassets
-Resources/Models/   # NudeNet Core ML produced in CI
-.github/workflows/build.yml
-LICENSE             # AGPL-3.0
-```
-
-## Build workflow
-
-1. Checkout
-2. Select Xcode 16.x
-3. Convert NudeNet 320n → Core ML into `Resources/Models`
-4. `xcodegen generate` + `xcodebuild`
-5. Package `.app` + `.dmg` artifacts
+1. Xcode 16.x  
+2. Convert NudeNet 320n → Core ML (`Scripts/convert_nudenet_coreml.py`, authenticated GitHub asset download)  
+3. `xcodegen generate`  
+4. `xcodebuild test`  
+5. Release `.app` + `.dmg` artifacts  
 
 ## Attribution
 
-- **NudeNet** — [notAI-tech/NudeNet](https://github.com/notAI-tech/NudeNet) (AGPL-3.0), YOLOv8-based 320n weights
-- Apple **Vision** / **ScreenCaptureKit** / **Core ML**
+- NudeNet — [notAI-tech/NudeNet](https://github.com/notAI-tech/NudeNet) (AGPL-3.0)  
+- Sticker PNGs — original project graphics (CC0); see [`Resources/ThirdParty/ATTRIBUTION.md`](Resources/ThirdParty/ATTRIBUTION.md)  
+- Adjacent CC0 icon inspiration — [pixelart-icons](https://github.com/tstamborski/pixelart-icons)
 
-## AGPL notice
+## Privacy
 
-This program is free software under the GNU Affero General Public License v3.0. If you modify and convey it (including offering it as a network service), you must provide corresponding source under AGPL-3.0. Bundling NudeNet weights inherits those obligations.
+No network calls in the app. Capture, detection, and rendering stay on-device.

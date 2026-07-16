@@ -162,21 +162,40 @@ enum BodyPartGroup: String, CaseIterable, Identifiable, Sendable {
 enum CensorStyle: String, CaseIterable, Identifiable, Codable, Sendable {
     case box
     case blur
+    case softBlur
+    case frosted
     case pixelate
+    case chunkyPixel
+    case crystallize
     case label
     case sticker
     case colorWash
+    case warningTape
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .box: return "Box"
-        case .blur: return "Blur"
-        case .pixelate: return "Pixelate"
+        case .box: return "Solid Box"
+        case .blur: return "Strong Blur"
+        case .softBlur: return "Soft Blur"
+        case .frosted: return "Frosted"
+        case .pixelate: return "Mosaic"
+        case .chunkyPixel: return "Chunky Pixel"
+        case .crystallize: return "Crystallize"
         case .label: return "Label"
         case .sticker: return "Sticker"
         case .colorWash: return "Color Wash"
+        case .warningTape: return "Warning Tape"
+        }
+    }
+
+    var isContentAware: Bool {
+        switch self {
+        case .blur, .softBlur, .frosted, .pixelate, .chunkyPixel, .crystallize:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -237,17 +256,72 @@ struct EffectPreset: Equatable, Hashable, Codable, Sendable, Identifiable {
     var sticker: StickerSymbol
     var fillOpacity: Double
     var animation: OverlayAnimation
+    var cornerRadius: Double
+    var feather: Double
+    var assetName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, style, blurRadius, pixelScale, labelText, labelEmoji, sticker, fillOpacity, animation
+        case cornerRadius, feather, assetName
+    }
+
+    init(
+        id: String,
+        style: CensorStyle,
+        blurRadius: Double,
+        pixelScale: Double,
+        labelText: String,
+        labelEmoji: String,
+        sticker: StickerSymbol,
+        fillOpacity: Double,
+        animation: OverlayAnimation,
+        cornerRadius: Double = 8,
+        feather: Double = 2,
+        assetName: String? = nil
+    ) {
+        self.id = id
+        self.style = style
+        self.blurRadius = blurRadius
+        self.pixelScale = pixelScale
+        self.labelText = labelText
+        self.labelEmoji = labelEmoji
+        self.sticker = sticker
+        self.fillOpacity = fillOpacity
+        self.animation = animation
+        self.cornerRadius = cornerRadius
+        self.feather = feather
+        self.assetName = assetName
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        style = try c.decode(CensorStyle.self, forKey: .style)
+        blurRadius = try c.decode(Double.self, forKey: .blurRadius)
+        pixelScale = try c.decode(Double.self, forKey: .pixelScale)
+        labelText = try c.decode(String.self, forKey: .labelText)
+        labelEmoji = try c.decode(String.self, forKey: .labelEmoji)
+        sticker = try c.decode(StickerSymbol.self, forKey: .sticker)
+        fillOpacity = try c.decode(Double.self, forKey: .fillOpacity)
+        animation = try c.decode(OverlayAnimation.self, forKey: .animation)
+        cornerRadius = try c.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 8
+        feather = try c.decodeIfPresent(Double.self, forKey: .feather) ?? 2
+        assetName = try c.decodeIfPresent(String.self, forKey: .assetName)
+    }
 
     static let `default` = EffectPreset(
         id: "default",
         style: .blur,
-        blurRadius: 24,
+        blurRadius: 28,
         pixelScale: 14,
         labelText: "CENSORED",
         labelEmoji: "🚫",
         sticker: .eyeSlash,
-        fillOpacity: 0.85,
-        animation: .pulse
+        fillOpacity: 0.92,
+        animation: .none,
+        cornerRadius: 8,
+        feather: 2,
+        assetName: nil
     )
 
     static let solid = EffectPreset(
@@ -258,20 +332,56 @@ struct EffectPreset: Equatable, Hashable, Codable, Sendable, Identifiable {
         labelText: "CENSORED",
         labelEmoji: "",
         sticker: .ban,
-        fillOpacity: 0.92,
-        animation: .none
+        fillOpacity: 0.95,
+        animation: .none,
+        cornerRadius: 4,
+        feather: 0,
+        assetName: nil
     )
 
     static let mosaic = EffectPreset(
         id: "mosaic",
         style: .pixelate,
         blurRadius: 18,
-        pixelScale: 18,
+        pixelScale: 16,
         labelText: "CENSORED",
         labelEmoji: "",
         sticker: .sparkles,
-        fillOpacity: 0.8,
-        animation: .none
+        fillOpacity: 1.0,
+        animation: .none,
+        cornerRadius: 6,
+        feather: 1,
+        assetName: nil
+    )
+
+    static let frosted = EffectPreset(
+        id: "frosted",
+        style: .frosted,
+        blurRadius: 22,
+        pixelScale: 12,
+        labelText: "CENSORED",
+        labelEmoji: "",
+        sticker: .lock,
+        fillOpacity: 0.85,
+        animation: .pulse,
+        cornerRadius: 10,
+        feather: 4,
+        assetName: nil
+    )
+
+    static let chunky = EffectPreset(
+        id: "chunky",
+        style: .chunkyPixel,
+        blurRadius: 12,
+        pixelScale: 28,
+        labelText: "CENSORED",
+        labelEmoji: "",
+        sticker: .xmark,
+        fillOpacity: 1.0,
+        animation: .none,
+        cornerRadius: 2,
+        feather: 0,
+        assetName: nil
     )
 
     static let stamp = EffectPreset(
@@ -282,9 +392,31 @@ struct EffectPreset: Equatable, Hashable, Codable, Sendable, Identifiable {
         labelText: "CENSORED",
         labelEmoji: "❌",
         sticker: .xmark,
-        fillOpacity: 0.75,
-        animation: .stampIn
+        fillOpacity: 0.8,
+        animation: .stampIn,
+        cornerRadius: 8,
+        feather: 0,
+        assetName: "sticker_ban"
     )
+
+    static let warning = EffectPreset(
+        id: "warning",
+        style: .warningTape,
+        blurRadius: 10,
+        pixelScale: 10,
+        labelText: "BLOCKED",
+        labelEmoji: "⚠️",
+        sticker: .caution,
+        fillOpacity: 0.9,
+        animation: .scanline,
+        cornerRadius: 0,
+        feather: 0,
+        assetName: nil
+    )
+
+    static var catalog: [EffectPreset] {
+        [.default, .frosted, .mosaic, .chunky, .solid, .stamp, .warning]
+    }
 }
 
 // MARK: - Per-part rules
@@ -353,8 +485,28 @@ enum PerformanceMode: String, CaseIterable, Identifiable, Codable, Sendable {
 
 struct MotionSettings: Equatable, Codable, Sendable {
     var smoothing: Double = 0.35
-    var coastSeconds: Double = 0.2
-    var globalPadding: Double = 0.08
+    var coastSeconds: Double = 0.22
+    var globalPadding: Double = 0.1
+}
+
+struct DisplayPreferences: Equatable, Codable, Sendable {
+    /// Empty means all displays enabled.
+    var enabledDisplayIDs: [UInt32] = []
+
+    func isEnabled(_ id: UInt32, available: [UInt32]) -> Bool {
+        if enabledDisplayIDs.isEmpty { return true }
+        return enabledDisplayIDs.contains(id)
+    }
+
+    mutating func setEnabled(_ id: UInt32, enabled: Bool, available: [UInt32]) {
+        var set = Set(enabledDisplayIDs.isEmpty ? available : enabledDisplayIDs)
+        if enabled {
+            set.insert(id)
+        } else {
+            set.remove(id)
+        }
+        enabledDisplayIDs = Array(set).sorted()
+    }
 }
 
 // MARK: - Top-level configuration
@@ -366,6 +518,11 @@ struct CensorConfiguration: Equatable, Codable, Sendable {
     var motion: MotionSettings
     var usePoseAssist: Bool
     var useFaceLandmarks: Bool
+    var displays: DisplayPreferences
+
+    enum CodingKeys: String, CodingKey {
+        case rules, globalEffect, performanceMode, motion, usePoseAssist, useFaceLandmarks, displays
+    }
 
     init(
         rules: [BodyPartRule] = BodyPartID.allCases.map { BodyPartRule.default(for: $0) },
@@ -373,7 +530,8 @@ struct CensorConfiguration: Equatable, Codable, Sendable {
         performanceMode: PerformanceMode = .balanced,
         motion: MotionSettings = MotionSettings(),
         usePoseAssist: Bool = true,
-        useFaceLandmarks: Bool = true
+        useFaceLandmarks: Bool = true,
+        displays: DisplayPreferences = DisplayPreferences()
     ) {
         self.rules = rules
         self.globalEffect = globalEffect
@@ -381,6 +539,18 @@ struct CensorConfiguration: Equatable, Codable, Sendable {
         self.motion = motion
         self.usePoseAssist = usePoseAssist
         self.useFaceLandmarks = useFaceLandmarks
+        self.displays = displays
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rules = try c.decodeIfPresent([BodyPartRule].self, forKey: .rules) ?? BodyPartID.allCases.map { BodyPartRule.default(for: $0) }
+        globalEffect = try c.decodeIfPresent(EffectPreset.self, forKey: .globalEffect) ?? .default
+        performanceMode = try c.decodeIfPresent(PerformanceMode.self, forKey: .performanceMode) ?? .balanced
+        motion = try c.decodeIfPresent(MotionSettings.self, forKey: .motion) ?? MotionSettings()
+        usePoseAssist = try c.decodeIfPresent(Bool.self, forKey: .usePoseAssist) ?? true
+        useFaceLandmarks = try c.decodeIfPresent(Bool.self, forKey: .useFaceLandmarks) ?? true
+        displays = try c.decodeIfPresent(DisplayPreferences.self, forKey: .displays) ?? DisplayPreferences()
     }
 
     func rule(for part: BodyPartID) -> BodyPartRule {
@@ -415,7 +585,6 @@ struct CensorConfiguration: Equatable, Codable, Sendable {
         }
     }
 
-    // Legacy compatibility helpers used during migration of call sites
     var style: CensorStyle {
         get { globalEffect.style }
         set { globalEffect.style = newValue }
@@ -424,5 +593,22 @@ struct CensorConfiguration: Equatable, Codable, Sendable {
     var censorText: String {
         get { globalEffect.labelText }
         set { globalEffect.labelText = newValue }
+    }
+}
+
+enum ConfigurationStore {
+    private static let key = "ScreenCensor.configuration.v2"
+
+    static func load() -> CensorConfiguration {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode(CensorConfiguration.self, from: data) else {
+            return CensorConfiguration()
+        }
+        return decoded
+    }
+
+    static func save(_ configuration: CensorConfiguration) {
+        guard let data = try? JSONEncoder().encode(configuration) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }

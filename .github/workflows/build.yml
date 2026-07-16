@@ -76,6 +76,24 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Run unit tests
+        run: |
+          set -euo pipefail
+          mkdir -p build/DerivedData artifacts
+          xcodebuild \
+            -project ScreenCensor.xcodeproj \
+            -scheme ScreenCensor \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            test
+        continue-on-error: false
+
       - name: Build app (ad-hoc signed)
         run: |
           set -euo pipefail

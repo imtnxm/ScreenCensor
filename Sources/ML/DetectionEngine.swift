@@ -12,6 +12,7 @@ final class DetectionEngine {
     private var coreMLModel: VNCoreMLModel?
     private var isProcessing = false
     private var framesProcessed: UInt64 = 0
+    private var framesDropped: UInt64 = 0
     private(set) var modelLoaded = false
 
     init() {
@@ -20,9 +21,13 @@ final class DetectionEngine {
     }
 
     var processedFrameCount: UInt64 {
-        stateLock.lock()
-        defer { stateLock.unlock() }
+        stateLock.lock(); defer { stateLock.unlock() }
         return framesProcessed
+    }
+
+    var droppedFrameCount: UInt64 {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return framesDropped
     }
 
     func updateConfiguration(_ configuration: CensorConfiguration) {
@@ -31,10 +36,11 @@ final class DetectionEngine {
         stateLock.unlock()
     }
 
-    /// Processes a frame if the previous frame has finished. Returns `nil` when dropping to keep up.
-    func process(pixelBuffer: CVPixelBuffer, displaySize: CGSize) async throws -> FrameDetections? {
+    /// Processes latest frame if idle. Returns nil when busy (caller should keep tracking/rendering).
+    func process(_ frame: CapturedFrame) async throws -> FrameDetections? {
         stateLock.lock()
         if isProcessing {
+            framesDropped += 1
             stateLock.unlock()
             return nil
         }
@@ -54,11 +60,9 @@ final class DetectionEngine {
             processingQueue.async {
                 do {
                     let detections = try self.runRequests(
-                        on: pixelBuffer,
+                        frame: frame,
                         configuration: config,
-                        model: model,
-                        displaySize: displaySize,
-                        timestamp: CACurrentMediaTime()
+                        model: model
                     )
                     continuation.resume(returning: detections)
                 } catch {
@@ -69,12 +73,11 @@ final class DetectionEngine {
     }
 
     private func runRequests(
-        on imageBuffer: CVPixelBuffer,
+        frame: CapturedFrame,
         configuration: CensorConfiguration,
-        model: VNCoreMLModel?,
-        displaySize: CGSize,
-        timestamp: CFTimeInterval
+        model: VNCoreMLModel?
     ) throws -> FrameDetections {
+        let imageBuffer = frame.pixelBuffer
         var requests: [VNRequest] = []
         var collected: [DetectionResult] = []
         let collectLock = NSLock()
@@ -86,15 +89,26 @@ final class DetectionEngine {
         if needsFace {
             let faceRequest = VNDetectFaceRectanglesRequest { request, _ in
                 guard let observations = request.results as? [VNFaceObservation] else { return }
-                let mapped: [DetectionResult] = observations.map { observation in
-                    // NudeNet also returns gendered faces; Vision faces map to both face parts.
-                    DetectionResult(
-                        part: .faceFemale,
-                        source: .visionFace,
-                        normalizedRect: observation.boundingBox,
-                        confidence: observation.confidence,
-                        label: "FACE_VISION"
-                    )
+                var mapped: [DetectionResult] = []
+                for observation in observations {
+                    if configuration.rule(for: .faceFemale).enabled {
+                        mapped.append(DetectionResult(
+                            part: .faceFemale,
+                            source: .visionFace,
+                            normalizedRect: observation.boundingBox,
+                            confidence: observation.confidence,
+                            label: "FACE_VISION"
+                        ))
+                    }
+                    if configuration.rule(for: .faceMale).enabled {
+                        mapped.append(DetectionResult(
+                            part: .faceMale,
+                            source: .visionFace,
+                            normalizedRect: observation.boundingBox,
+                            confidence: observation.confidence * 0.95,
+                            label: "FACE_VISION"
+                        ))
+                    }
                 }
                 collectLock.lock()
                 collected.append(contentsOf: mapped)
@@ -148,7 +162,8 @@ final class DetectionEngine {
                 collected.append(contentsOf: mapped)
                 collectLock.unlock()
             }
-            mlRequest.imageCropAndScaleOption = .scaleFill
+            // Preserve aspect; letterboxing is preferable to distorted boxes.
+            mlRequest.imageCropAndScaleOption = .scaleFit
             requests.append(mlRequest)
         }
 
@@ -186,11 +201,11 @@ final class DetectionEngine {
         }
 
         let filtered = PartRuleEngine.filter(collected, configuration: configuration)
-
         return FrameDetections(
-            timestamp: timestamp,
-            displaySize: displaySize,
-            pixelBuffer: imageBuffer,
+            timestamp: frame.timestamp,
+            displayID: frame.displayID,
+            geometry: frame.geometry,
+            pixelBuffer: frame.pixelBuffer,
             results: filtered
         )
     }
@@ -200,23 +215,18 @@ final class DetectionEngine {
         let candidates: [(String, String)] = [
             ("NudeNet320n", "mlmodelc"),
             ("NudeNet320n", "mlpackage"),
-            ("NudeNet320n", "mlmodel"),
-            ("IntimateZones", "mlmodelc"),
-            ("IntimateZones", "mlmodel")
+            ("NudeNet320n", "mlmodel")
         ]
 
         for (name, ext) in candidates {
             guard let url = bundle.url(forResource: name, withExtension: ext) else { continue }
             do {
                 let compiledURL: URL
-                if ext == "mlmodel" {
-                    compiledURL = try MLModel.compileModel(at: url)
-                } else if ext == "mlpackage" {
+                if ext == "mlmodel" || ext == "mlpackage" {
                     compiledURL = try MLModel.compileModel(at: url)
                 } else {
                     compiledURL = url
                 }
-
                 let mlConfig = MLModelConfiguration()
                 mlConfig.computeUnits = MLComputeUnits.all
                 let model = try MLModel(contentsOf: compiledURL, configuration: mlConfig)
@@ -230,20 +240,17 @@ final class DetectionEngine {
 
     private static func boundingBox(for points: [CGPoint], in faceBox: CGRect) -> CGRect {
         guard !points.isEmpty else { return faceBox }
-
         let xs = points.map(\.x)
         let ys = points.map(\.y)
         guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else {
             return faceBox
         }
-
         let absolute = CGRect(
             x: faceBox.origin.x + minX * faceBox.width,
             y: faceBox.origin.y + minY * faceBox.height,
             width: (maxX - minX) * faceBox.width,
             height: (maxY - minY) * faceBox.height
         )
-
         let padded = absolute.insetBy(dx: -absolute.width * 0.35, dy: -absolute.height * 0.35)
         return PartRuleEngine.clampNormalized(padded)
     }

@@ -8,40 +8,84 @@ import ScreenCaptureKit
 @MainActor
 final class CensorCoordinator: ObservableObject {
     @Published private(set) var framesProcessed: UInt64 = 0
+    @Published private(set) var framesDropped: UInt64 = 0
     @Published private(set) var activeDetectionCount = 0
     @Published private(set) var lastError: String?
     @Published private(set) var modelLoaded = false
-    @Published private(set) var measuredFPS: Double = 0
+    @Published private(set) var captureFPS: Double = 0
+    @Published private(set) var renderFPS: Double = 0
+    @Published private(set) var inferenceFPS: Double = 0
+    @Published private(set) var usingGPUFallback = false
+    @Published private(set) var availableDisplays: [DisplayInfo] = []
 
-    private let overlay = OverlayWindowController()
     private let captureManager = ScreenCaptureManager()
     private let detectionEngine = DetectionEngine()
 
     private var configuration = CensorConfiguration()
     private var isRunning = false
-    private var tracks: [TrackKey: TrackState] = [:]
-    private var fpsWindowStart = CACurrentMediaTime()
-    private var fpsFrameCount = 0
+    private var runtimes: [CGDirectDisplayID: DisplayRuntime] = [:]
+
+    private var captureCount = 0
+    private var renderCount = 0
+    private var inferenceCount = 0
+    private var metricsStart = CACurrentMediaTime()
+
+    private var screenObserver: NSObjectProtocol?
 
     init() {
         captureManager.delegate = self
         modelLoaded = detectionEngine.modelLoaded
+        refreshDisplays()
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshDisplays()
+                if self?.isRunning == true {
+                    try? await self?.restartCapture()
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+        }
+    }
+
+    func refreshDisplays() {
+        availableDisplays = DisplayCatalog.current()
     }
 
     func start(configuration: CensorConfiguration) async throws {
         self.configuration = configuration
         detectionEngine.updateConfiguration(configuration)
-        captureManager.updateConfiguration(configuration)
-        overlay.show()
+        refreshDisplays()
         modelLoaded = detectionEngine.modelLoaded
 
+        teardownRuntimes()
+        let enabled = enabledDisplayIDSet()
+        for display in availableDisplays where enabled.contains(display.id) {
+            let runtime = DisplayRuntime(display: display, configuration: configuration)
+            runtime.show()
+            runtimes[display.displayID] = runtime
+            if runtime.usingGPUFallback { usingGPUFallback = true }
+        }
+
+        let windowIDs = Set(runtimes.values.map(\.windowID))
         do {
-            try await captureManager.start(excludingWindowID: overlay.windowID)
+            try await captureManager.start(
+                displays: availableDisplays,
+                enabledDisplayIDs: enabled,
+                excludingWindowIDs: windowIDs
+            )
             isRunning = true
             lastError = nil
         } catch {
-            overlay.hide()
-            isRunning = false
+            await stop()
             lastError = error.localizedDescription
             throw error
         }
@@ -50,49 +94,87 @@ final class CensorCoordinator: ObservableObject {
     func stop() async {
         isRunning = false
         await captureManager.stop()
-        overlay.hide()
-        tracks.removeAll()
+        teardownRuntimes()
         activeDetectionCount = 0
-        measuredFPS = 0
+        captureFPS = 0
+        renderFPS = 0
+        inferenceFPS = 0
     }
 
     func updateConfiguration(_ configuration: CensorConfiguration) {
-        let performanceChanged = configuration.performanceMode != self.configuration.performanceMode
+        let modeChanged = configuration.performanceMode != self.configuration.performanceMode
+        let displaysChanged = configuration.displays != self.configuration.displays
         self.configuration = configuration
         detectionEngine.updateConfiguration(configuration)
-        captureManager.updateConfiguration(configuration)
-
-        guard isRunning, performanceChanged else { return }
-        Task {
-            do {
-                try await captureManager.restartIfNeeded()
-            } catch {
-                lastError = error.localizedDescription
-            }
+        for runtime in runtimes.values {
+            runtime.updateConfiguration(configuration)
         }
+        guard isRunning, modeChanged || displaysChanged else { return }
+        Task { try? await restartCapture() }
     }
 
-    private func handle(pixelBuffer: CVPixelBuffer) {
-        guard isRunning else { return }
+    private func restartCapture() async throws {
+        refreshDisplays()
+        let enabled = enabledDisplayIDSet()
+        // Rebuild runtimes for newly enabled displays
+        for display in availableDisplays where enabled.contains(display.id) && runtimes[display.displayID] == nil {
+            let runtime = DisplayRuntime(display: display, configuration: configuration)
+            runtime.show()
+            runtimes[display.displayID] = runtime
+        }
+        for id in Array(runtimes.keys) where !enabled.contains(UInt32(id)) {
+            runtimes[id]?.hide()
+            runtimes.removeValue(forKey: id)
+        }
+        let windowIDs = Set(runtimes.values.map(\.windowID))
+        try await captureManager.restartIfNeeded(
+            displays: availableDisplays,
+            enabledDisplayIDs: enabled,
+            excludingWindowIDs: windowIDs
+        )
+    }
 
-        let displaySize = overlayDisplaySize()
-        overlay.updateFrameContext(pixelBuffer: pixelBuffer, displaySize: displaySize)
+    private func enabledDisplayIDSet() -> Set<UInt32> {
+        let available = Set(availableDisplays.map(\.id))
+        if configuration.displays.enabledDisplayIDs.isEmpty {
+            return available
+        }
+        return Set(configuration.displays.enabledDisplayIDs).intersection(available)
+    }
+
+    private func teardownRuntimes() {
+        for runtime in runtimes.values {
+            runtime.hide()
+        }
+        runtimes.removeAll()
+    }
+
+    private func handle(frame: CapturedFrame) {
+        guard isRunning else { return }
+        captureCount += 1
+        noteMetrics()
+
+        guard let runtime = runtimes[frame.displayID] else { return }
+        runtime.publish(frame)
 
         Task { [weak self] in
             guard let self else { return }
             do {
-                guard let frame = try await detectionEngine.process(
-                    pixelBuffer: pixelBuffer,
-                    displaySize: displaySize
-                ) else {
+                if let detections = try await detectionEngine.process(frame) {
                     await MainActor.run {
-                        self.renderCoastingOnly()
+                        self.inferenceCount += 1
+                        self.framesProcessed = self.detectionEngine.processedFrameCount
+                        self.framesDropped = self.detectionEngine.droppedFrameCount
+                        self.modelLoaded = self.detectionEngine.modelLoaded
+                        runtime.ingest(detections: detections, configuration: self.configuration)
+                        self.activeDetectionCount = self.runtimes.values.reduce(0) { $0 + $1.activeCount }
                     }
-                    return
-                }
-
-                await MainActor.run {
-                    self.apply(frame: frame)
+                } else {
+                    await MainActor.run {
+                        self.framesDropped = self.detectionEngine.droppedFrameCount
+                        runtime.renderPredicted()
+                        self.renderCount += 1
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -100,169 +182,132 @@ final class CensorCoordinator: ObservableObject {
                 }
             }
         }
+
+        // Always try a display-refresh style render from latest mailbox + tracker prediction.
+        runtime.renderPredicted()
+        renderCount += 1
     }
 
-    private func apply(frame: FrameDetections) {
-        framesProcessed = detectionEngine.processedFrameCount
-        modelLoaded = detectionEngine.modelLoaded
-        overlay.updateFrameContext(pixelBuffer: frame.pixelBuffer, displaySize: frame.displaySize)
-        noteFPS()
-
+    private func noteMetrics() {
         let now = CACurrentMediaTime()
-        let smoothing = configuration.motion.smoothing
-        let coast = configuration.motion.coastSeconds
-
-        var claimed = Set<TrackKey>()
-        var unmatched = tracks
-
-        for detection in frame.results {
-            let padded = PartRuleEngine.paddedRect(
-                detection.normalizedRect,
-                part: detection.part,
-                configuration: configuration
-            )
-            let screenRect = CoordinateMapper.screenRect(
-                fromVisionNormalized: padded,
-                displaySize: frame.displaySize
-            )
-            let effect = PartRuleEngine.effect(for: detection.part, configuration: configuration)
-
-            var bestKey: TrackKey?
-            var bestIoU: CGFloat = 0.12
-            for (key, state) in unmatched where key.part == detection.part {
-                let score = iou(screenRect, state.rect)
-                if score > bestIoU {
-                    bestIoU = score
-                    bestKey = key
-                }
-            }
-
-            let key = bestKey ?? TrackKey(id: detection.id, part: detection.part)
-            if let bestKey { unmatched.removeValue(forKey: bestKey) }
-
-            let previous = tracks[key]?.rect
-            let blended: CGRect
-            if let previous {
-                blended = CGRect(
-                    x: lerp(previous.origin.x, screenRect.origin.x, smoothing),
-                    y: lerp(previous.origin.y, screenRect.origin.y, smoothing),
-                    width: lerp(previous.width, screenRect.width, smoothing),
-                    height: lerp(previous.height, screenRect.height, smoothing)
-                )
-            } else {
-                blended = screenRect
-            }
-
-            tracks[key] = TrackState(
-                rect: blended,
-                confidence: detection.confidence,
-                effect: effect,
-                lastSeen: now
-            )
-            claimed.insert(key)
+        let elapsed = now - metricsStart
+        if elapsed >= 1 {
+            captureFPS = Double(captureCount) / elapsed
+            renderFPS = Double(renderCount) / elapsed
+            inferenceFPS = Double(inferenceCount) / elapsed
+            captureCount = 0
+            renderCount = 0
+            inferenceCount = 0
+            metricsStart = now
         }
-
-        // Coast stale tracks briefly
-        for (key, state) in tracks {
-            if claimed.contains(key) { continue }
-            if now - state.lastSeen > coast {
-                tracks.removeValue(forKey: key)
-            }
-        }
-
-        let regions: [TrackedRegion] = tracks.map { key, state in
-            TrackedRegion(
-                id: key.id,
-                part: key.part,
-                screenRect: state.rect,
-                confidence: state.confidence,
-                effect: state.effect
-            )
-        }
-
-        activeDetectionCount = regions.count
-        overlay.render(regions: regions)
-    }
-
-    private func renderCoastingOnly() {
-        let now = CACurrentMediaTime()
-        let coast = configuration.motion.coastSeconds
-        tracks = tracks.filter { now - $0.value.lastSeen <= coast }
-        let regions: [TrackedRegion] = tracks.map { key, state in
-            TrackedRegion(
-                id: key.id,
-                part: key.part,
-                screenRect: state.rect,
-                confidence: state.confidence,
-                effect: state.effect
-            )
-        }
-        activeDetectionCount = regions.count
-        overlay.render(regions: regions)
-    }
-
-    private func noteFPS() {
-        fpsFrameCount += 1
-        let now = CACurrentMediaTime()
-        let elapsed = now - fpsWindowStart
-        if elapsed >= 1.0 {
-            measuredFPS = Double(fpsFrameCount) / elapsed
-            fpsFrameCount = 0
-            fpsWindowStart = now
-        }
-    }
-
-    private func overlayDisplaySize() -> CGSize {
-        NSScreen.main?.frame.size ?? CGSize(width: 1920, height: 1080)
-    }
-
-    private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat {
-        a + (b - a) * t
-    }
-
-    private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        let intersection = a.intersection(b)
-        guard !intersection.isNull && !intersection.isEmpty else { return 0 }
-        let interArea = intersection.width * intersection.height
-        let unionArea = a.width * a.height + b.width * b.height - interArea
-        guard unionArea > 0 else { return 0 }
-        return interArea / unionArea
     }
 }
 
 extension CensorCoordinator: ScreenCaptureManagerDelegate {
-    nonisolated func screenCaptureManager(_ manager: ScreenCaptureManager, didOutput pixelBuffer: CVPixelBuffer) {
+    nonisolated func screenCaptureManager(_ manager: ScreenCaptureManager, didOutput frame: CapturedFrame) {
         Task { @MainActor in
-            self.handle(pixelBuffer: pixelBuffer)
+            self.handle(frame: frame)
         }
     }
 
-    nonisolated func screenCaptureManager(_ manager: ScreenCaptureManager, didFail error: Error) {
+    nonisolated func screenCaptureManager(
+        _ manager: ScreenCaptureManager,
+        displayID: CGDirectDisplayID,
+        didFail error: Error
+    ) {
         Task { @MainActor in
             self.lastError = error.localizedDescription
         }
     }
 }
 
-private struct TrackKey: Hashable {
-    let id: UUID
-    let part: BodyPartID
-}
+// MARK: - Per-display runtime
 
-private struct TrackState {
-    var rect: CGRect
-    var confidence: Float
-    var effect: EffectPreset
-    var lastSeen: CFTimeInterval
-}
+@MainActor
+final class DisplayRuntime {
+    let display: DisplayInfo
+    private let overlay: OverlayWindowController
+    private let tracker = RegionTracker()
+    private let mailbox = LatestFrameMailbox()
+    private var configuration: CensorConfiguration
+    private var latestGeometry: FrameGeometry?
+    private(set) var activeCount = 0
 
-enum CoordinateMapper {
-    static func screenRect(fromVisionNormalized rect: CGRect, displaySize: CGSize) -> CGRect {
-        CGRect(
-            x: rect.origin.x * displaySize.width,
-            y: rect.origin.y * displaySize.height,
-            width: rect.size.width * displaySize.width,
-            height: rect.size.height * displaySize.height
-        )
+    init(display: DisplayInfo, configuration: CensorConfiguration) {
+        self.display = display
+        self.configuration = configuration
+        overlay = OverlayWindowController(display: display)
+        tracker.updateSettings(TrackerSettings(motion: configuration.motion))
+    }
+
+    var windowID: CGWindowID { overlay.windowID }
+    var usingGPUFallback: Bool { overlay.usingGPUFallback }
+
+    func show() { overlay.show() }
+    func hide() {
+        overlay.hide()
+        tracker.reset()
+        activeCount = 0
+    }
+
+    func updateConfiguration(_ configuration: CensorConfiguration) {
+        self.configuration = configuration
+        tracker.updateSettings(TrackerSettings(motion: configuration.motion))
+    }
+
+    func publish(_ frame: CapturedFrame) {
+        mailbox.publish(frame)
+        latestGeometry = frame.geometry
+    }
+
+    func ingest(detections: FrameDetections, configuration: CensorConfiguration) {
+        self.configuration = configuration
+        latestGeometry = detections.geometry
+        mailbox.publish(CapturedFrame(
+            displayID: detections.displayID,
+            timestamp: detections.timestamp,
+            pixelBuffer: detections.pixelBuffer,
+            geometry: detections.geometry
+        ))
+
+        let inputs: [TrackerInput] = detections.results.map { det in
+            let padded = PartRuleEngine.paddedRect(
+                det.normalizedRect,
+                part: det.part,
+                configuration: configuration
+            )
+            return TrackerInput(
+                part: det.part,
+                normalizedRect: padded,
+                confidence: det.confidence,
+                effect: PartRuleEngine.effect(for: det.part, configuration: configuration)
+            )
+        }
+        let tracked = tracker.update(detections: inputs, now: CACurrentMediaTime())
+        present(tracked: tracked, geometry: detections.geometry, pixelBuffer: detections.pixelBuffer)
+    }
+
+    func renderPredicted() {
+        guard let frame = mailbox.peek(), let geometry = latestGeometry ?? Optional(frame.geometry) else {
+            return
+        }
+        let tracked = tracker.predicted(at: CACurrentMediaTime())
+        present(tracked: tracked, geometry: geometry, pixelBuffer: frame.pixelBuffer)
+    }
+
+    private func present(tracked: [TrackedInternal], geometry: FrameGeometry, pixelBuffer: CVPixelBuffer) {
+        let regions: [TrackedRegion] = tracked.map {
+            TrackedRegion(
+                id: $0.id,
+                part: $0.part,
+                displayID: display.displayID,
+                localRect: geometry.overlayLocalRect(fromVisionNormalized: $0.normalizedRect),
+                normalizedRect: $0.normalizedRect,
+                confidence: $0.confidence,
+                effect: $0.effect
+            )
+        }
+        activeCount = regions.count
+        overlay.render(pixelBuffer: pixelBuffer, geometry: geometry, regions: regions)
     }
 }

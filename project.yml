@@ -35,12 +35,14 @@ targets:
           - "Models/README.md"
           - "Models/.gitkeep"
           - "Assets.xcassets"
+          - "ThirdParty/ATTRIBUTION.md"
+          - "ThirdParty/CC0-PIXELART-ICONS-LICENSE.txt"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.screencensor.app
         PRODUCT_NAME: ScreenCensor
-        MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "3"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: ScreenCensor Pro
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
@@ -55,18 +57,41 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_TESTABILITY: YES
     entitlements:
       path: Resources/ScreenCensor.entitlements
-    scheme:
-      testTargets: []
-      gatherCoverageData: false
+
+  ScreenCensorTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Tests
+      - path: Sources/Capture/FrameGeometry.swift
+      - path: Sources/App/RegionTracker.swift
+      - path: Sources/App/CensorModels.swift
+      - path: Sources/App/DetectionTypes.swift
+      - path: Sources/ML/PartRuleEngine.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.screencensor.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks"
 
 schemes:
   ScreenCensor:
     build:
       targets:
         ScreenCensor: all
+        ScreenCensorTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - ScreenCensorTests
     archive:
       config: Release
